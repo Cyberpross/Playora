@@ -1,167 +1,174 @@
-/**
- * Flash Games Archive Crawler
- * Single-file version
- * Node.js 18+
- */
-
 import fs from "fs";
 import path from "path";
 import { execSync } from "child_process";
 import fetch from "node-fetch";
 
-const GH_TOKEN = process.env.GH_TOKEN;
-const USERNAME = "Cyberpross"; // <-- CHANGE THIS
-const START_ID = "swords-and-sandals-2";
-const MAX_MB = Number(process.env.MAX_REPO_SIZE_MB || 1024);
-const STATE_FILE = ".state.json";
-
-if (!GH_TOKEN) {
-  console.error("❌ GH_TOKEN not set");
+const TOKEN = process.env.GH_TOKEN;
+if (!TOKEN) {
+  console.error("❌ GH_TOKEN missing");
   process.exit(1);
 }
 
-let state = {
-  page: 1,
-  index: 0,
-  repo: 1,
-  size: 0,
-  started: false
-};
+const COLLECTION_API =
+  "https://archive.org/advancedsearch.php?q=collection:softwarelibrary_flash_games&fl[]=identifier&rows=100&page=";
 
-if (fs.existsSync(STATE_FILE)) {
-  state = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+const SIZE_LIMIT = 1024 * 1024 * 1024;
+const MAX_SWF_SIZE = 95 * 1024 * 1024;
+
+let repoIndex = 1;
+let currentSize = 0;
+let page = 1;
+
+const baseDir = process.cwd();
+const progressFile = path.join(process.cwd(), "processed.json");
+
+let processed = new Set();
+if (fs.existsSync(progressFile)) {
+  processed = new Set(JSON.parse(fs.readFileSync(progressFile)));
 }
 
-gitConfig();
-createRepo(`game-${state.repo}`);
-
-while (true) {
-  const api =
-    `https://archive.org/advancedsearch.php?q=collection:softwarelibrary_flash_games` +
-    `&fl[]=identifier&sort[]=identifier asc&rows=100&page=${state.page}&output=json`;
-
-  const res = await fetch(api);
-  const json = await res.json();
-  const docs = json.response.docs;
-
-  if (!docs.length) break;
-
-  for (let i = state.index; i < docs.length; i++) {
-    const id = docs[i].identifier;
-
-    if (!state.started) {
-      if (id === START_ID) state.started = true;
-      else continue;
-    }
-
-    const added = await processGame(id);
-    state.size += added;
-    state.index = i + 1;
-    saveState();
-
-    if (state.size >= MAX_MB) {
-      pushRepo();
-      state.repo++;
-      state.size = 0;
-      state.index = i + 1;
-      saveState();
-      createRepo(`game-${state.repo}`);
-    }
-  }
-
-  state.page++;
-  state.index = 0;
-  saveState();
+function saveProgress() {
+  fs.writeFileSync(progressFile, JSON.stringify([...processed], null, 2));
+  execSync("git add processed.json");
+  try {
+    execSync('git commit -m "update progress"');
+  } catch {}
 }
 
-pushRepo();
-console.log("✅ Done");
-
-
-// ================= FUNCTIONS =================
-
-function saveState() {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-}
-
-function gitConfig() {
-  execSync(`git config --global user.name "flash-bot"`);
-  execSync(`git config --global user.email "bot@users.noreply.github.com"`);
+function run(cmd) {
+  execSync(cmd, { stdio: "inherit" });
 }
 
 function createRepo(name) {
-  console.log(`📦 Creating repo ${name}`);
+  console.log(`🚀 Creating repo ${name}`);
+  run(`rm -rf repo`);
+  run(`mkdir repo`);
+  process.chdir("repo");
 
-  execSync(
-    `curl -s -X POST -H "Authorization: token ${GH_TOKEN}" ` +
-    `https://api.github.com/user/repos ` +
-    `-d '{"name":"${name}","private":false}'`
+  run(`git init`);
+  run(`git config user.name "github-actions"`);
+  run(`git config user.email "actions@github.com"`);
+
+  run(
+    `git remote add origin https://x-access-token:${TOKEN}@github.com/${process.env.GITHUB_REPOSITORY_OWNER}/${name}.git`
   );
 
-  execSync("rm -rf .git");
-  execSync("git init");
-  execSync("git branch -M main");
-  execSync(`git remote add origin https://${GH_TOKEN}@github.com/${USERNAME}/${name}.git`);
+  fetch(`https://api.github.com/user/repos`, {
+    method: "POST",
+    headers: {
+      Authorization: `token ${TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name, private: false }),
+  });
 }
 
-function pushRepo() {
-  execSync("git add .");
-  execSync(`git commit -m "add flash games" || true`);
-  execSync("git push -u origin main");
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  return r.json();
 }
 
 async function processGame(id) {
-  console.log(`🎮 ${id}`);
-
-  const meta = await fetch(`https://archive.org/metadata/${id}`).then(r => r.json());
-  const files = meta.files || [];
-
-  const swf = files.find(f => f.name?.toLowerCase().endsWith(".swf"));
-  if (!swf) return 0;
-
-  const img = files.find(f => f.name?.match(/\.(png|jpg|jpeg)$/i));
-  const title = safeName(meta.metadata?.title || id);
-  const dir = path.join(process.cwd(), title);
-
-  fs.mkdirSync(dir, { recursive: true });
-
-  await download(id, swf.name, path.join(dir, "game.swf"));
-
-  let cover = "";
-  if (img) {
-    cover = img.name.toLowerCase().endsWith(".png") ? "c.png" : "c.jpg";
-    await download(id, img.name, path.join(dir, cover));
+  if (processed.has(id)) {
+    console.log(`⏭️ already processed: ${id}`);
+    return 0;
   }
 
-  fs.writeFileSync(path.join(dir, "index.html"), html(cover));
+  console.log(`🎮 ${id}`);
 
-  return (swf.size || 0) / 1024 / 1024;
-}
+  const meta = await fetchJSON(`https://archive.org/metadata/${id}`);
+  if (!meta.files) return 0;
 
-async function download(id, file, dest) {
-  const url = `https://archive.org/download/${id}/${file}`;
-  const res = await fetch(url);
-  const buf = Buffer.from(await res.arrayBuffer());
-  fs.writeFileSync(dest, buf);
-}
+  const swf = meta.files.find(f => f.name?.endsWith(".swf"));
+  if (!swf) return 0;
 
-function html(img) {
-  return `<!doctype html>
+  if (swf.size && swf.size > MAX_SWF_SIZE) {
+    console.log(`⏭️ SWF too large`);
+    processed.add(id);
+    saveProgress();
+    return 0;
+  }
+
+  const img = meta.files.find(f =>
+    f.name?.match(/\.(png|jpg|jpeg)$/i)
+  );
+
+  const gameDir = path.join(process.cwd(), id);
+  fs.mkdirSync(gameDir, { recursive: true });
+
+  const swfUrl = `https://archive.org/download/${id}/${swf.name}`;
+  const swfBuf = await fetch(swfUrl).then(r => r.arrayBuffer());
+  fs.writeFileSync(path.join(gameDir, "game.swf"), Buffer.from(swfBuf));
+
+  let imgName = "";
+  if (img) {
+    const ext = img.name.split(".").pop();
+    imgName = `c.${ext}`;
+    const imgBuf = await fetch(
+      `https://archive.org/download/${id}/${img.name}`
+    ).then(r => r.arrayBuffer());
+    fs.writeFileSync(
+      path.join(gameDir, imgName),
+      Buffer.from(imgBuf)
+    );
+  }
+
+  fs.writeFileSync(
+    path.join(gameDir, "index.html"),
+    `<!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8">
-  <script src="../ruffle/ruffle.js"></script>
+<meta charset="utf-8">
+<script src="../ruffle/ruffle.js"></script>
 </head>
 <body>
-${img ? `<img src="${img}" style="display:none">` : ""}
-<embed src="game.swf" width="800" height="600">
+${imgName ? `<img src="${imgName}" width="300"><br>` : ""}
+<embed src="game.swf" width="800" height="600"></embed>
 </body>
-</html>`;
+</html>`
+  );
+
+  processed.add(id);
+  saveProgress();
+
+  run("git add .");
+  try {
+    run(`git commit -m "add ${id}"`);
+  } catch {}
+
+  const size = fs.statSync(path.join(gameDir, "game.swf")).size;
+  currentSize += size;
+
+  return size;
 }
 
-function safeName(s) {
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+async function main() {
+  createRepo(`game-${repoIndex}`);
+
+  while (true) {
+    const data = await fetchJSON(COLLECTION_API + page);
+    const docs = data.response?.docs;
+    if (!docs || docs.length === 0) break;
+
+    for (const d of docs) {
+      await processGame(d.identifier);
+
+      if (currentSize >= SIZE_LIMIT) {
+        run("git branch -M main");
+        run("git push -u origin main");
+
+        process.chdir(baseDir);
+        repoIndex++;
+        currentSize = 0;
+        createRepo(`game-${repoIndex}`);
+      }
+    }
+
+    page++;
+  }
+
+  run("git branch -M main");
+  run("git push -u origin main");
 }
+
+main();
