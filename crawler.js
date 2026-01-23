@@ -3,57 +3,91 @@ import path from "path";
 import { execSync } from "child_process";
 import fetch from "node-fetch";
 
+/* ================= CONFIG ================= */
+
 const TOKEN = process.env.GH_TOKEN;
 if (!TOKEN) {
   console.error("❌ GH_TOKEN missing");
   process.exit(1);
 }
 
+const START_FROM = "15-aevil_202304";
+
 const COLLECTION_API =
   "https://archive.org/advancedsearch.php?q=collection:softwarelibrary_flash_games&fl[]=identifier&rows=100&page=";
 
-const SIZE_LIMIT = 1024 * 1024 * 1024;
-const MAX_SWF_SIZE = 95 * 1024 * 1024;
+const SIZE_LIMIT = 1024 * 1024 * 1024; // 1 GB per repo
+const MAX_SWF_SIZE = 95 * 1024 * 1024; // 95 MB max SWF
+
+/* ========================================= */
 
 let repoIndex = 1;
 let currentSize = 0;
 let page = 1;
+let started = false;
 
 const baseDir = process.cwd();
-const progressFile = path.join(process.cwd(), "processed.json");
+const progressFile = path.join(baseDir, "processed.json");
+
+/* ============ LOAD PROGRESS =============== */
 
 let processed = new Set();
 if (fs.existsSync(progressFile)) {
-  processed = new Set(JSON.parse(fs.readFileSync(progressFile)));
+  processed = new Set(JSON.parse(fs.readFileSync(progressFile, "utf8")));
 }
 
-function saveProgress() {
-  fs.writeFileSync(progressFile, JSON.stringify([...processed], null, 2));
-  execSync("git add processed.json");
-  try {
-    execSync('git commit -m "update progress"');
-  } catch {}
-}
+/* ========================================= */
 
 function run(cmd) {
   execSync(cmd, { stdio: "inherit" });
 }
 
+function saveProgress() {
+  fs.writeFileSync(progressFile, JSON.stringify([...processed], null, 2));
+  run("git add processed.json");
+  try {
+    run(`git commit -m "update progress"`);
+  } catch {}
+}
+
+async function fetchJSON(url) {
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (FlashCrawler/1.0)",
+    },
+  });
+
+  const text = await res.text();
+
+  if (text.trim().startsWith("<")) {
+    console.log("⚠️ Archive.org returned HTML, skipping");
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    console.log("⚠️ Invalid JSON, skipping");
+    return null;
+  }
+}
+
 function createRepo(name) {
   console.log(`🚀 Creating repo ${name}`);
-  run(`rm -rf repo`);
-  run(`mkdir repo`);
+
+  run("rm -rf repo");
+  run("mkdir repo");
   process.chdir("repo");
 
-  run(`git init`);
-  run(`git config user.name "github-actions"`);
-  run(`git config user.email "actions@github.com"`);
+  run("git init");
+  run("git config user.name github-actions");
+  run("git config user.email actions@github.com");
 
   run(
     `git remote add origin https://x-access-token:${TOKEN}@github.com/${process.env.GITHUB_REPOSITORY_OWNER}/${name}.git`
   );
 
-  fetch(`https://api.github.com/user/repos`, {
+  fetch("https://api.github.com/user/repos", {
     method: "POST",
     headers: {
       Authorization: `token ${TOKEN}`,
@@ -61,11 +95,6 @@ function createRepo(name) {
     },
     body: JSON.stringify({ name, private: false }),
   });
-}
-
-async function fetchJSON(url) {
-  const r = await fetch(url);
-  return r.json();
 }
 
 async function processGame(id) {
@@ -77,13 +106,13 @@ async function processGame(id) {
   console.log(`🎮 ${id}`);
 
   const meta = await fetchJSON(`https://archive.org/metadata/${id}`);
-  if (!meta.files) return 0;
+  if (!meta || !meta.files) return 0;
 
   const swf = meta.files.find(f => f.name?.endsWith(".swf"));
   if (!swf) return 0;
 
   if (swf.size && swf.size > MAX_SWF_SIZE) {
-    console.log(`⏭️ SWF too large`);
+    console.log(`⏭️ SWF too large, skipping`);
     processed.add(id);
     saveProgress();
     return 0;
@@ -96,9 +125,12 @@ async function processGame(id) {
   const gameDir = path.join(process.cwd(), id);
   fs.mkdirSync(gameDir, { recursive: true });
 
-  const swfUrl = `https://archive.org/download/${id}/${swf.name}`;
-  const swfBuf = await fetch(swfUrl).then(r => r.arrayBuffer());
-  fs.writeFileSync(path.join(gameDir, "game.swf"), Buffer.from(swfBuf));
+  const swfBuf = await fetch(
+    `https://archive.org/download/${id}/${swf.name}`
+  ).then(r => r.arrayBuffer());
+
+  const swfPath = path.join(gameDir, "game.swf");
+  fs.writeFileSync(swfPath, Buffer.from(swfBuf));
 
   let imgName = "";
   if (img) {
@@ -107,6 +139,7 @@ async function processGame(id) {
     const imgBuf = await fetch(
       `https://archive.org/download/${id}/${img.name}`
     ).then(r => r.arrayBuffer());
+
     fs.writeFileSync(
       path.join(gameDir, imgName),
       Buffer.from(imgBuf)
@@ -119,6 +152,7 @@ async function processGame(id) {
 <html>
 <head>
 <meta charset="utf-8">
+<title>${id}</title>
 <script src="../ruffle/ruffle.js"></script>
 </head>
 <body>
@@ -136,7 +170,7 @@ ${imgName ? `<img src="${imgName}" width="300"><br>` : ""}
     run(`git commit -m "add ${id}"`);
   } catch {}
 
-  const size = fs.statSync(path.join(gameDir, "game.swf")).size;
+  const size = fs.statSync(swfPath).size;
   currentSize += size;
 
   return size;
@@ -147,11 +181,27 @@ async function main() {
 
   while (true) {
     const data = await fetchJSON(COLLECTION_API + page);
+    if (!data) {
+      page++;
+      continue;
+    }
+
     const docs = data.response?.docs;
     if (!docs || docs.length === 0) break;
 
     for (const d of docs) {
-      await processGame(d.identifier);
+      const id = d.identifier;
+
+      if (!started) {
+        if (id === START_FROM) {
+          console.log(`▶️ Starting from ${START_FROM}`);
+          started = true;
+        } else {
+          continue;
+        }
+      }
+
+      await processGame(id);
 
       if (currentSize >= SIZE_LIMIT) {
         run("git branch -M main");
