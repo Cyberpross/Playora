@@ -3,7 +3,7 @@ import path from "path";
 import { execSync } from "child_process";
 import fetch from "node-fetch";
 
-/* ================= CONFIG ================= */
+/* =============== CONFIG ================= */
 
 const TOKEN = process.env.GH_TOKEN;
 if (!TOKEN) {
@@ -11,32 +11,32 @@ if (!TOKEN) {
   process.exit(1);
 }
 
-const START_FROM = "15-aevil_202304";
+const START_FROM = "15-aevil_202304"; // 👈 DIRECT START GAME
 
 const COLLECTION_API =
   "https://archive.org/advancedsearch.php?q=collection:softwarelibrary_flash_games&fl[]=identifier&rows=100&page=";
 
-const SIZE_LIMIT = 1024 * 1024 * 1024; // 1 GB per repo
-const MAX_SWF_SIZE = 95 * 1024 * 1024; // 95 MB max SWF
+const SIZE_LIMIT = 1024 * 1024 * 1024; // 1GB per repo
+const MAX_SWF_SIZE = 95 * 1024 * 1024;
 
-/* ========================================= */
+/* ======================================= */
 
 let repoIndex = 1;
 let currentSize = 0;
 let page = 1;
-let started = false;
+let startFound = false;
 
 const baseDir = process.cwd();
 const progressFile = path.join(baseDir, "processed.json");
 
-/* ============ LOAD PROGRESS =============== */
+/* ========== LOAD PROGRESS =============== */
 
 let processed = new Set();
 if (fs.existsSync(progressFile)) {
   processed = new Set(JSON.parse(fs.readFileSync(progressFile, "utf8")));
 }
 
-/* ========================================= */
+/* ======================================= */
 
 function run(cmd) {
   execSync(cmd, { stdio: "inherit" });
@@ -52,22 +52,16 @@ function saveProgress() {
 
 async function fetchJSON(url) {
   const res = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (FlashCrawler/1.0)",
-    },
+    headers: { "User-Agent": "FlashCrawler/1.0" },
   });
 
   const text = await res.text();
 
-  if (text.trim().startsWith("<")) {
-    console.log("⚠️ Archive.org returned HTML, skipping");
-    return null;
-  }
+  if (text.trim().startsWith("<")) return null;
 
   try {
     return JSON.parse(text);
   } catch {
-    console.log("⚠️ Invalid JSON, skipping");
     return null;
   }
 }
@@ -99,7 +93,7 @@ function createRepo(name) {
 
 async function processGame(id) {
   if (processed.has(id)) {
-    console.log(`⏭️ already processed: ${id}`);
+    console.log(`⏭️ ${id} already done`);
     return 0;
   }
 
@@ -112,7 +106,7 @@ async function processGame(id) {
   if (!swf) return 0;
 
   if (swf.size && swf.size > MAX_SWF_SIZE) {
-    console.log(`⏭️ SWF too large, skipping`);
+    console.log(`⏭️ SWF too large`);
     processed.add(id);
     saveProgress();
     return 0;
@@ -129,8 +123,7 @@ async function processGame(id) {
     `https://archive.org/download/${id}/${swf.name}`
   ).then(r => r.arrayBuffer());
 
-  const swfPath = path.join(gameDir, "game.swf");
-  fs.writeFileSync(swfPath, Buffer.from(swfBuf));
+  fs.writeFileSync(path.join(gameDir, "game.swf"), Buffer.from(swfBuf));
 
   let imgName = "";
   if (img) {
@@ -152,7 +145,6 @@ async function processGame(id) {
 <html>
 <head>
 <meta charset="utf-8">
-<title>${id}</title>
 <script src="../ruffle/ruffle.js"></script>
 </head>
 <body>
@@ -170,7 +162,7 @@ ${imgName ? `<img src="${imgName}" width="300"><br>` : ""}
     run(`git commit -m "add ${id}"`);
   } catch {}
 
-  const size = fs.statSync(swfPath).size;
+  const size = fs.statSync(path.join(gameDir, "game.swf")).size;
   currentSize += size;
 
   return size;
@@ -181,21 +173,21 @@ async function main() {
 
   while (true) {
     const data = await fetchJSON(COLLECTION_API + page);
-    if (!data) {
+    if (!data || !data.response?.docs) {
       page++;
       continue;
     }
 
-    const docs = data.response?.docs;
-    if (!docs || docs.length === 0) break;
+    const docs = data.response.docs;
 
     for (const d of docs) {
       const id = d.identifier;
 
-      if (!started) {
+      // 🔥 DIRECT START LOGIC (like swords & sandals 2)
+      if (!startFound) {
         if (id === START_FROM) {
+          startFound = true;
           console.log(`▶️ Starting from ${START_FROM}`);
-          started = true;
         } else {
           continue;
         }
