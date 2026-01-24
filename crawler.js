@@ -3,83 +3,171 @@ import { execSync } from "child_process";
 import fetch from "node-fetch";
 
 const TOKEN = process.env.GH_TOKEN;
-if (!TOKEN) throw new Error("GH_TOKEN missing");
+const REPO = process.env.GITHUB_REPOSITORY;
 
-const START_ID = "15-aevil_202304"; // 👈 hard start
+if (!TOKEN) throw new Error("❌ GH_TOKEN missing");
+if (!REPO) throw new Error("❌ GITHUB_REPOSITORY missing");
+
+const START_ID = "15-aevil_202304";
 const COLLECTION = "softwarelibrary_flash_games";
 
-let processed = new Set(
-  fs.existsSync("processed.json")
-    ? JSON.parse(fs.readFileSync("processed.json"))
-    : []
-);
+const PROCESSED_FILE = "processed.json";
+
+let processed = new Set();
+if (fs.existsSync(PROCESSED_FILE)) {
+  processed = new Set(JSON.parse(fs.readFileSync(PROCESSED_FILE, "utf8")));
+}
 
 function run(cmd) {
   execSync(cmd, { stdio: "inherit" });
 }
 
-async function getMeta(id) {
-  const r = await fetch(`https://archive.org/metadata/${id}`);
-  return r.json();
+async function fetchJSON(url) {
+  const res = await fetch(url);
+  const text = await res.text();
+  if (text.trim().startsWith("<")) {
+    throw new Error("❌ HTML received instead of JSON");
+  }
+  return JSON.parse(text);
 }
 
-async function nextItems(cursor) {
-  const url = `https://archive.org/metadata/${COLLECTION}?cursor=${cursor}`;
-  const r = await fetch(url);
-  return r.json();
+async function getCollectionPage(cursor = "") {
+  const url =
+    `https://archive.org/metadata/${COLLECTION}` +
+    (cursor ? `?cursor=${cursor}` : "");
+  return fetchJSON(url);
 }
 
-async function main() {
-  run("git init");
+async function getMetadata(id) {
+  return fetchJSON(`https://archive.org/metadata/${id}`);
+}
+
+async function downloadFile(url, dest) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Download failed");
+  const buf = Buffer.from(await res.arrayBuffer());
+  fs.writeFileSync(dest, buf);
+  return buf.length;
+}
+
+function gitSetup() {
   run("git config user.name bot");
   run("git config user.email bot@bot");
 
-  let cursor = START_ID;
+  try {
+    run("git remote remove origin");
+  } catch {}
+
+  run(
+    `git remote add origin https://x-access-token:${TOKEN}@github.com/${REPO}.git`
+  );
+}
+
+async function main() {
+  gitSetup();
+
+  let cursor = "";
   let started = false;
 
   while (true) {
-    const data = await nextItems(cursor);
-    if (!data?.members?.length) break;
+    const page = await getCollectionPage(cursor);
+    const items = page.members || [];
 
-    for (const item of data.members) {
+    for (const item of items) {
+      const id = item.identifier;
+
       if (!started) {
-        if (item.identifier === START_ID) started = true;
-        else continue;
+        if (id === START_ID) {
+          started = true;
+        } else {
+          continue;
+        }
       }
 
-      if (processed.has(item.identifier)) continue;
+      if (processed.has(id)) {
+        console.log("⏭️ skipped", id);
+        continue;
+      }
 
-      console.log("🎮", item.identifier);
+      console.log("🎮", id);
 
-      const meta = await getMeta(item.identifier);
+      let meta;
+      try {
+        meta = await getMetadata(id);
+      } catch {
+        console.log("⚠️ metadata failed", id);
+        continue;
+      }
+
       const swf = meta.files?.find(f => f.name.endsWith(".swf"));
-      if (!swf) continue;
+      if (!swf) {
+        console.log("❌ no swf", id);
+        continue;
+      }
 
-      const dir = `games/${item.identifier}`;
+      const dir = `games/${id}`;
       fs.mkdirSync(dir, { recursive: true });
 
-      const buf = await fetch(
-        `https://archive.org/download/${item.identifier}/${swf.name}`
-      ).then(r => r.arrayBuffer());
+      const swfUrl = `https://archive.org/download/${id}/${swf.name}`;
+      const swfPath = `${dir}/game.swf`;
 
-      fs.writeFileSync(`${dir}/game.swf`, Buffer.from(buf));
+      try {
+        const size = await downloadFile(swfUrl, swfPath);
+        if (size > 100 * 1024 * 1024) {
+          console.log("🚫 too large, skipping", id);
+          fs.rmSync(dir, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        console.log("❌ swf download failed", id);
+        continue;
+      }
 
-      processed.add(item.identifier);
-      fs.writeFileSync("processed.json", JSON.stringify([...processed], null, 2));
+      // image (first jpg/png)
+      const img = meta.files.find(f =>
+        f.name.match(/\.(png|jpg|jpeg)$/i)
+      );
+
+      if (img) {
+        try {
+          const ext = img.name.split(".").pop();
+          await downloadFile(
+            `https://archive.org/download/${id}/${img.name}`,
+            `${dir}/c.${ext}`
+          );
+        } catch {}
+      }
+
+      // index.html
+      fs.writeFileSync(
+        `${dir}/index.html`,
+        `
+<!DOCTYPE html>
+<html>
+<body>
+<script src="../ruffle/ruffle.js"></script>
+<embed src="game.swf" width="100%" height="100%">
+</body>
+</html>
+        `.trim()
+      );
+
+      processed.add(id);
+      fs.writeFileSync(PROCESSED_FILE, JSON.stringify([...processed], null, 2));
 
       run("git add .");
-      run(`git commit -m "add ${item.identifier}"`);
+      run(`git commit -m "add ${id}"`);
     }
 
-    cursor = data.cursor;
+    cursor = page.cursor;
     if (!cursor) break;
   }
 
   run("git branch -M main");
-  run(
-    `git remote add origin https://x-access-token:${TOKEN}@github.com/${process.env.GITHUB_REPOSITORY}.git`
-  );
   run("git push -u origin main");
 }
 
-main();
+main().catch(err => {
+  console.error("❌ FATAL:", err.message);
+  process.exit(1);
+});
