@@ -11,20 +11,17 @@ if (!TOKEN) {
   process.exit(1);
 }
 
-const START_FROM = "15-aevil_202304"; // 👈 DIRECT START GAME
-
 const COLLECTION_API =
   "https://archive.org/advancedsearch.php?q=collection:softwarelibrary_flash_games&fl[]=identifier&rows=100&page=";
 
-const SIZE_LIMIT = 1024 * 1024 * 1024; // 1GB per repo
-const MAX_SWF_SIZE = 95 * 1024 * 1024;
+const SIZE_LIMIT = 1024 * 1024 * 1024; // 1 GB per repo
+const MAX_SWF_SIZE = 95 * 1024 * 1024; // 95 MB SWF limit
 
 /* ======================================= */
 
 let repoIndex = 1;
 let currentSize = 0;
 let page = 1;
-let startFound = false;
 
 const baseDir = process.cwd();
 const progressFile = path.join(baseDir, "processed.json");
@@ -57,6 +54,7 @@ async function fetchJSON(url) {
 
   const text = await res.text();
 
+  // Archive.org sometimes returns HTML
   if (text.trim().startsWith("<")) return null;
 
   try {
@@ -93,7 +91,7 @@ function createRepo(name) {
 
 async function processGame(id) {
   if (processed.has(id)) {
-    console.log(`⏭️ ${id} already done`);
+    console.log(`⏭️ already processed: ${id}`);
     return 0;
   }
 
@@ -106,7 +104,7 @@ async function processGame(id) {
   if (!swf) return 0;
 
   if (swf.size && swf.size > MAX_SWF_SIZE) {
-    console.log(`⏭️ SWF too large`);
+    console.log(`⏭️ SWF too large, skipping`);
     processed.add(id);
     saveProgress();
     return 0;
@@ -123,12 +121,14 @@ async function processGame(id) {
     `https://archive.org/download/${id}/${swf.name}`
   ).then(r => r.arrayBuffer());
 
-  fs.writeFileSync(path.join(gameDir, "game.swf"), Buffer.from(swfBuf));
+  const swfPath = path.join(gameDir, "game.swf");
+  fs.writeFileSync(swfPath, Buffer.from(swfBuf));
 
   let imgName = "";
   if (img) {
     const ext = img.name.split(".").pop();
     imgName = `c.${ext}`;
+
     const imgBuf = await fetch(
       `https://archive.org/download/${id}/${img.name}`
     ).then(r => r.arrayBuffer());
@@ -145,6 +145,7 @@ async function processGame(id) {
 <html>
 <head>
 <meta charset="utf-8">
+<title>${id}</title>
 <script src="../ruffle/ruffle.js"></script>
 </head>
 <body>
@@ -162,7 +163,7 @@ ${imgName ? `<img src="${imgName}" width="300"><br>` : ""}
     run(`git commit -m "add ${id}"`);
   } catch {}
 
-  const size = fs.statSync(path.join(gameDir, "game.swf")).size;
+  const size = fs.statSync(swfPath).size;
   currentSize += size;
 
   return size;
@@ -179,21 +180,10 @@ async function main() {
     }
 
     const docs = data.response.docs;
+    if (docs.length === 0) break;
 
     for (const d of docs) {
-      const id = d.identifier;
-
-      // 🔥 DIRECT START LOGIC (like swords & sandals 2)
-      if (!startFound) {
-        if (id === START_FROM) {
-          startFound = true;
-          console.log(`▶️ Starting from ${START_FROM}`);
-        } else {
-          continue;
-        }
-      }
-
-      await processGame(id);
+      await processGame(d.identifier);
 
       if (currentSize >= SIZE_LIMIT) {
         run("git branch -M main");
