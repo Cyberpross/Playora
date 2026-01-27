@@ -1,6 +1,8 @@
 /**
- * Robust Internet Archive identifier crawler
- * Handles pagination + API edge cases safely
+ * Internet Archive crawler
+ * - Saves each identifier immediately
+ * - Logs every save
+ * - Uses Advanced Search JSON API
  */
 
 import fs from "fs";
@@ -12,6 +14,9 @@ const ROWS_PER_PAGE = 1000;
 let start = 0;
 let totalFound = null;
 
+// File ko pehle clear / create kar do
+fs.writeFileSync(OUTPUT_FILE, "", "utf8");
+
 async function fetchPage(startIndex) {
   const url = new URL("https://archive.org/advancedsearch.php");
 
@@ -22,27 +27,20 @@ async function fetchPage(startIndex) {
   url.searchParams.set("output", "json");
 
   const res = await fetch(url);
-
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}`);
-  }
-
   return res.json();
 }
 
 async function main() {
-  const identifiers = [];
-
-  console.log("Fetching identifiers from Internet Archive...");
+  console.log("🚀 Crawler started...");
 
   while (true) {
-    console.log(`Fetching page starting at ${start}...`);
+    console.log(`📄 Fetching page starting at ${start}`);
 
     const data = await fetchPage(start);
 
-    // 🛑 SAFETY CHECK
-    if (!data.response || !Array.isArray(data.response.docs)) {
-      console.log("No more valid results returned. Stopping.");
+    // Safety check
+    if (!data.response || !data.response.docs) {
+      console.log("🛑 No more data from API. Stopping.");
       break;
     }
 
@@ -50,35 +48,28 @@ async function main() {
 
     if (totalFound === null) {
       totalFound = numFound;
-      console.log(`Total items reported by IA: ${totalFound}`);
+      console.log(`📦 Total items reported: ${totalFound}`);
     }
 
-    if (docs.length === 0) {
-      break;
-    }
+    if (docs.length === 0) break;
 
     for (const doc of docs) {
       if (doc.identifier) {
-        identifiers.push(doc.identifier);
+        fs.appendFileSync(OUTPUT_FILE, doc.identifier + "\n", "utf8");
+        console.log(`✅ Saved: ${doc.identifier}`);
       }
     }
 
     start += ROWS_PER_PAGE;
 
-    // 🛑 Prevent overshooting numFound
-    if (start >= totalFound) {
-      break;
-    }
+    if (start >= totalFound) break;
   }
 
-  fs.writeFileSync(OUTPUT_FILE, identifiers.join("\n"), "utf8");
-
-  console.log(`Done!`);
-  console.log(`Collected ${identifiers.length} identifiers.`);
-  console.log(`Saved to ${OUTPUT_FILE}`);
+  console.log("🎉 Done!");
+  console.log(`📁 File saved as: ${OUTPUT_FILE}`);
 }
 
 main().catch(err => {
-  console.error("Error:", err);
+  console.error("❌ Error:", err);
   process.exit(1);
 });
