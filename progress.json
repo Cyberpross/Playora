@@ -1,6 +1,6 @@
 {
   "pack": 1,
-  "sizeMB": 2.760800361633301,
+  "sizeMB": 2.8145761489868164,
   "completed": [
     "1100_spore_cubes",
     "1100_SparkYourNeurons",
@@ -8,7 +8,8 @@
     "1100_aitchu_2",
     "1100_crazy_relax",
     "1100_hk_mobs",
-    "1100_jumping_sheeps"
+    "1100_jumping_sheeps",
+    "1100_moebius_syndrome"
   ],
   "skipped": []
 }
