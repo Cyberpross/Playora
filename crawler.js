@@ -1,6 +1,6 @@
 /**
  * Internet Archive Flash Game Downloader
- * FULL VERSION – Redirect-safe, Resume-safe
+ * FINAL STABLE VERSION
  */
 
 import fs from "fs";
@@ -8,13 +8,16 @@ import path from "path";
 import https from "https";
 import { execSync } from "child_process";
 
-const OWNER = "Cyberpross";            // your GitHub username
-const BASE_REPO = "flash-pack";        // flash-pack-001, 002...
+/* ================= CONFIG ================= */
+
+const OWNER = "Cyberpross";          // GitHub username
+const BASE_REPO = "flash-pack";      // flash-pack-001, 002...
 const ITEMS_FILE = "names.txt";
 const PROGRESS_FILE = "progress.json";
 
-const MAX_ITEM_MB = 100;               // skip SWF > 100MB
-const PACK_LIMIT_MB = 1024;            // ~1GB per repo
+const MAX_ITEM_MB = 100;             // skip SWF > 100MB
+const PACK_LIMIT_MB = 1024;          // ~1GB per repo
+const DOWNLOAD_DELAY_MS = 1000;      // polite delay
 
 const GH_TOKEN = process.env.GH_TOKEN;
 
@@ -23,7 +26,7 @@ if (!GH_TOKEN) {
   process.exit(1);
 }
 
-/* ---------------- UTILS ---------------- */
+/* ================= UTILS ================= */
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -43,6 +46,8 @@ function saveProgress(p) {
   fs.writeFileSync(PROGRESS_FILE, JSON.stringify(p, null, 2));
 }
 
+/* ================= GITHUB ================= */
+
 function ghApi(method, url, body) {
   return fetch(`https://api.github.com${url}`, {
     method,
@@ -56,7 +61,7 @@ function ghApi(method, url, body) {
 
 async function createRepo(pack) {
   const name = `${BASE_REPO}-${String(pack).padStart(3, "0")}`;
-  console.log(`🆕 Creating new repo: ${name}`);
+  console.log(`🆕 Creating repo: ${name}`);
 
   await ghApi("POST", "/user/repos", {
     name,
@@ -64,12 +69,14 @@ async function createRepo(pack) {
   });
 
   execSync(
-    `git remote set-url origin https://${GH_TOKEN}@github.com/${OWNER}/${name}.git`
+    `git remote set-url origin https://${GH_TOKEN}@github.com/${OWNER}/${name}.git`,
+    { stdio: "inherit" }
   );
-  execSync("git push -u origin main");
+
+  execSync("git push -u origin main", { stdio: "inherit" });
 }
 
-/* -------- DOWNLOAD (REDIRECT SAFE) -------- */
+/* ================= DOWNLOAD ================= */
 
 function download(url, dest, redirects = 0) {
   return new Promise((resolve, reject) => {
@@ -80,14 +87,14 @@ function download(url, dest, redirects = 0) {
     const file = fs.createWriteStream(dest);
 
     https.get(url, res => {
-      // handle redirects
+      // Handle redirects
       if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
         file.close();
         fs.unlinkSync(dest);
 
-        const next = res.headers.location;
-        console.log(`🔁 Redirect → ${next}`);
-        return resolve(download(next, dest, redirects + 1));
+        const nextUrl = res.headers.location;
+        console.log(`🔁 Redirect → ${nextUrl}`);
+        return resolve(download(nextUrl, dest, redirects + 1));
       }
 
       if (res.statusCode !== 200) {
@@ -106,12 +113,12 @@ function download(url, dest, redirects = 0) {
   });
 }
 
-/* ---------------- MAIN ---------------- */
+/* ================= MAIN ================= */
 
 async function main() {
   const items = fs.readFileSync(ITEMS_FILE, "utf8")
     .split("\n")
-    .map(s => s.trim())
+    .map(i => i.trim())
     .filter(Boolean);
 
   const progress = loadProgress();
@@ -119,12 +126,19 @@ async function main() {
   console.log("🚀 Downloader started");
   console.log(`📦 Current pack: ${progress.pack}`);
 
+  /* 🔐 IMPORTANT: fix git auth for CURRENT repo */
+  const repoName = process.env.GITHUB_REPOSITORY.split("/")[1];
+  execSync(
+    `git remote set-url origin https://${GH_TOKEN}@github.com/${OWNER}/${repoName}.git`,
+    { stdio: "inherit" }
+  );
+
   for (const item of items) {
     if (
       progress.completed.includes(item) ||
       progress.skipped.includes(item)
     ) {
-      console.log(`⏭ Already processed: ${item}`);
+      console.log(`⏭ Skipped (already done): ${item}`);
       continue;
     }
 
@@ -156,7 +170,7 @@ async function main() {
       continue;
     }
 
-    // check pack size
+    // Check pack size
     if (progress.sizeMB + swfMB >= PACK_LIMIT_MB) {
       progress.pack++;
       progress.sizeMB = 0;
@@ -167,11 +181,11 @@ async function main() {
     const itemDir = path.join("games", item);
     fs.mkdirSync(itemDir, { recursive: true });
 
-    const base = `https://archive.org/download/${item}/`;
+    const baseUrl = `https://archive.org/download/${item}/`;
 
     console.log(`⬇ Downloading SWF`);
     await download(
-      base + swf.name,
+      baseUrl + swf.name,
       path.join(itemDir, `${item}.swf`)
     );
 
@@ -186,7 +200,7 @@ async function main() {
 
       console.log(`🖼 Downloading image`);
       await download(
-        base + img.name,
+        baseUrl + img.name,
         path.join(itemDir, `c.${ext}`)
       );
     }
@@ -195,12 +209,12 @@ async function main() {
     progress.sizeMB += swfMB;
     saveProgress(progress);
 
-    execSync("git add .");
-    execSync(`git commit -m "Add ${item}"`);
-    execSync("git push");
+    execSync("git add .", { stdio: "inherit" });
+    execSync(`git commit -m "Add ${item}"`, { stdio: "inherit" });
+    execSync("git push", { stdio: "inherit" });
 
     console.log(`✅ Finished: ${item}`);
-    await sleep(1000); // polite delay
+    await sleep(DOWNLOAD_DELAY_MS);
   }
 
   console.log("🎉 ALL DONE");
