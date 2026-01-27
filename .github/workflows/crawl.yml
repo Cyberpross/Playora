@@ -1,35 +1,31 @@
-name: Crawl Internet Archive
+name: Flash Game Downloader
 
 on:
   workflow_dispatch:
 
 jobs:
-  crawl:
+  download:
     runs-on: ubuntu-latest
+
+    env:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          persist-credentials: true
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 18
 
+      - name: Configure git
+        run: |
+          git config user.name "auto-downloader"
+          git config user.email "downloader@github.com"
+
       - name: Run crawler
         run: node crawler.js
-
-      - name: Commit & push names.txt
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-
-          git add names.txt
-
-          # Agar koi change nahi hua to fail na ho
-          git diff --cached --quiet || git commit -m "Add Internet Archive identifiers"
-
-          git push
