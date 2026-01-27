@@ -1,6 +1,6 @@
 {
   "pack": 1,
-  "sizeMB": 8.088109970092773,
+  "sizeMB": 10.24102783203125,
   "completed": [
     "1100_spore_cubes",
     "1100_SparkYourNeurons",
@@ -18,7 +18,8 @@
     "1100_trapshoot",
     "highway-predator",
     "1100_grammas_12_piece_chiken_head_dinner",
-    "1100_labyrinthe"
+    "1100_labyrinthe",
+    "1100_stande"
   ],
   "skipped": []
 }
