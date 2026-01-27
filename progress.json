@@ -1,6 +1,6 @@
 {
   "pack": 1,
-  "sizeMB": 10.443684577941895,
+  "sizeMB": 12.127147674560547,
   "completed": [
     "1100_spore_cubes",
     "1100_SparkYourNeurons",
@@ -21,7 +21,8 @@
     "1100_labyrinthe",
     "1100_stande",
     "1100_ballistic_biscuit",
-    "1100_fifteen"
+    "1100_fifteen",
+    "1100_found_lost"
   ],
   "skipped": []
 }
