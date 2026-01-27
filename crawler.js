@@ -1,23 +1,16 @@
 /**
- * Fetch all item identifiers from the Internet Archive
- * collection: softwarelibrary_flash_games
- *
- * - Uses Advanced Search (JSON)
- * - Handles pagination
- * - Does NOT download any files
- * - Outputs identifiers to names.txt
- *
- * Node.js 18+ recommended (built-in fetch)
+ * Robust Internet Archive identifier crawler
+ * Handles pagination + API edge cases safely
  */
 
 import fs from "fs";
 
 const COLLECTION = "softwarelibrary_flash_games";
 const OUTPUT_FILE = "names.txt";
+const ROWS_PER_PAGE = 1000;
 
-// Advanced Search settings
-const ROWS_PER_PAGE = 1000; // max allowed by IA
 let start = 0;
+let totalFound = null;
 
 async function fetchPage(startIndex) {
   const url = new URL("https://archive.org/advancedsearch.php");
@@ -28,13 +21,13 @@ async function fetchPage(startIndex) {
   url.searchParams.set("start", startIndex.toString());
   url.searchParams.set("output", "json");
 
-  const response = await fetch(url);
+  const res = await fetch(url);
 
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
   }
 
-  return response.json();
+  return res.json();
 }
 
 async function main() {
@@ -46,10 +39,22 @@ async function main() {
     console.log(`Fetching page starting at ${start}...`);
 
     const data = await fetchPage(start);
-    const docs = data.response.docs;
 
-    if (!docs || docs.length === 0) {
-      break; // no more results
+    // 🛑 SAFETY CHECK
+    if (!data.response || !Array.isArray(data.response.docs)) {
+      console.log("No more valid results returned. Stopping.");
+      break;
+    }
+
+    const { docs, numFound } = data.response;
+
+    if (totalFound === null) {
+      totalFound = numFound;
+      console.log(`Total items reported by IA: ${totalFound}`);
+    }
+
+    if (docs.length === 0) {
+      break;
     }
 
     for (const doc of docs) {
@@ -59,9 +64,13 @@ async function main() {
     }
 
     start += ROWS_PER_PAGE;
+
+    // 🛑 Prevent overshooting numFound
+    if (start >= totalFound) {
+      break;
+    }
   }
 
-  // Write to file, one identifier per line
   fs.writeFileSync(OUTPUT_FILE, identifiers.join("\n"), "utf8");
 
   console.log(`Done!`);
