@@ -1,6 +1,6 @@
 {
   "pack": 1,
-  "sizeMB": 4.305912971496582,
+  "sizeMB": 4.345921516418457,
   "completed": [
     "1100_spore_cubes",
     "1100_SparkYourNeurons",
@@ -13,7 +13,8 @@
     "1100_project_eddie",
     "1100_river_kayak",
     "1100_sail_voyage",
-    "1100_the_hidden_ring"
+    "1100_the_hidden_ring",
+    "1100_chicken_and_eggs"
   ],
   "skipped": []
 }
