@@ -1,6 +1,6 @@
 {
   "pack": 1,
-  "sizeMB": 58.26218605041504,
+  "sizeMB": 58.44438076019287,
   "completed": [
     "1100_spore_cubes",
     "1100_SparkYourNeurons",
@@ -42,7 +42,8 @@
     "office-slacking-11",
     "office-slacking-2",
     "office-slacking-7-valentines-day-api2",
-    "CHblackhole_flash"
+    "CHblackhole_flash",
+    "1100_crazy_shuttle"
   ],
   "skipped": []
 }
