@@ -1,6 +1,6 @@
 {
   "pack": 1,
-  "sizeMB": 61.703609466552734,
+  "sizeMB": 69.6218490600586,
   "completed": [
     "1100_spore_cubes",
     "1100_SparkYourNeurons",
@@ -46,7 +46,8 @@
     "1100_crazy_shuttle",
     "1100_egg",
     "1100_skidoo_tt",
-    "1100_zombie_survival"
+    "1100_zombie_survival",
+    "coal_express_4"
   ],
   "skipped": []
 }
