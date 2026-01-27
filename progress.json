@@ -1,6 +1,6 @@
 {
   "pack": 1,
-  "sizeMB": 69.6218490600586,
+  "sizeMB": 69.80002975463867,
   "completed": [
     "1100_spore_cubes",
     "1100_SparkYourNeurons",
@@ -47,7 +47,8 @@
     "1100_egg",
     "1100_skidoo_tt",
     "1100_zombie_survival",
-    "coal_express_4"
+    "coal_express_4",
+    "need-for-speed-underground-drag-racer_flash"
   ],
   "skipped": []
 }
