@@ -1,7 +1,7 @@
 /**
  * FINAL Internet Archive Flash Downloader
- * Controller repo = Playora (NO uploads here)
- * Game repos = flash-pack-001, 002, ...
+ * Controller repo: Playora (NO game uploads here)
+ * Game repos: flash-pack-001, 002, ...
  */
 
 import fs from "fs";
@@ -13,7 +13,7 @@ import { execSync } from "child_process";
 /* ================= CONFIG ================= */
 
 const OWNER = "Cyberpross";
-const BASE_REPO = "flash-pack";      // flash-pack-001...
+const BASE_REPO = "flash-pack";
 const ITEMS_FILE = "names.txt";
 const PROGRESS_FILE = "progress.json";
 
@@ -48,8 +48,8 @@ async function ghApi(method, url, body) {
   const res = await fetch(`https://api.github.com${url}`, {
     method,
     headers: {
-      "Authorization": `token ${GH_TOKEN}`,
-      "Accept": "application/vnd.github+json",
+      Authorization: `token ${GH_TOKEN}`,
+      Accept: "application/vnd.github+json",
       "User-Agent": "flash-downloader"
     },
     body: body ? JSON.stringify(body) : undefined
@@ -78,6 +78,9 @@ async function ensurePackRepo(pack) {
   );
 
   execSync("git pull origin main || true");
+
+  // ✅ IMPORTANT: set upstream ONCE
+  execSync("git push -u origin main || true");
 }
 
 /* ================= DOWNLOAD ================= */
@@ -89,35 +92,44 @@ function download(url, dest, redirects = 0, retried = false) {
     const proto = url.startsWith("https://") ? https : http;
     const file = fs.createWriteStream(dest);
 
-    proto.get(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; IA-Downloader/1.0)"
-      }
-    }, res => {
+    proto.get(
+      url,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; IA-Downloader/1.0)"
+        }
+      },
+      res => {
+        if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+          file.close();
+          fs.unlinkSync(dest);
+          console.log(`🔁 Redirect → ${res.headers.location}`);
+          return resolve(
+            download(res.headers.location, dest, redirects + 1, retried)
+          );
+        }
 
-      if ([301,302,303,307,308].includes(res.statusCode)) {
-        file.close(); fs.unlinkSync(dest);
-        console.log(`🔁 Redirect → ${res.headers.location}`);
-        return resolve(download(res.headers.location, dest, redirects + 1, retried));
-      }
+        if (res.statusCode === 401 && !retried && url.startsWith("https://")) {
+          file.close();
+          fs.unlinkSync(dest);
+          console.log("🔄 401 → retry via HTTP");
+          return resolve(
+            download(url.replace("https://", "http://"), dest, redirects, true)
+          );
+        }
 
-      if (res.statusCode === 401 && !retried && url.startsWith("https://")) {
-        file.close(); fs.unlinkSync(dest);
-        console.log("🔄 401 → retry via HTTP");
-        return resolve(
-          download(url.replace("https://","http://"), dest, redirects, true)
-        );
-      }
+        if (res.statusCode !== 200) {
+          file.close();
+          fs.unlinkSync(dest);
+          return reject(new Error(`HTTP ${res.statusCode}`));
+        }
 
-      if (res.statusCode !== 200) {
-        file.close(); fs.unlinkSync(dest);
-        return reject(new Error(`HTTP ${res.statusCode}`));
+        res.pipe(file);
+        file.on("finish", () => file.close(resolve));
       }
-
-      res.pipe(file);
-      file.on("finish", () => file.close(resolve));
-    }).on("error", err => {
-      file.close(); fs.unlinkSync(dest);
+    ).on("error", err => {
+      file.close();
+      fs.unlinkSync(dest);
       reject(err);
     });
   });
@@ -126,18 +138,24 @@ function download(url, dest, redirects = 0, retried = false) {
 /* ================= MAIN ================= */
 
 async function main() {
-  const items = fs.readFileSync(ITEMS_FILE, "utf8")
-    .split("\n").map(x => x.trim()).filter(Boolean);
+  if (!fs.existsSync(ITEMS_FILE)) {
+    throw new Error("names.txt not found in repo root");
+  }
+
+  const items = fs
+    .readFileSync(ITEMS_FILE, "utf8")
+    .split("\n")
+    .map(x => x.trim())
+    .filter(Boolean);
 
   const progress = loadProgress();
 
   console.log("🚀 Downloader started");
 
-  // 🚫 NEVER push to Playora
+  // 🚫 Never push to Playora
   await ensurePackRepo(progress.pack);
 
   for (const item of items) {
-
     if (progress.completed.includes(item) || progress.skipped.includes(item)) {
       console.log(`⏭ Already handled: ${item}`);
       continue;
@@ -145,8 +163,9 @@ async function main() {
 
     console.log(`🔍 Item: ${item}`);
 
-    const meta = await fetch(`https://archive.org/metadata/${item}`)
-      .then(r => r.json());
+    const meta = await fetch(`https://archive.org/metadata/${item}`).then(r =>
+      r.json()
+    );
 
     const files = meta.files || [];
     const swf = files.find(f => f.name?.toLowerCase().endsWith(".swf"));
