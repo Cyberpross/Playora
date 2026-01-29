@@ -1,7 +1,6 @@
 /**
- * FINAL Internet Archive Flash Downloader
- * Controller repo: Playora (NO game uploads here)
- * Game repos: flash-pack-001, 002, ...
+ * FINAL – CORRECT ARCHITECTURE VERSION
+ * No duplicate packs, no git errors
  */
 
 import fs from "fs";
@@ -22,10 +21,11 @@ const PACK_LIMIT_MB = 1024;
 const DELAY_MS = 1200;
 
 const GH_TOKEN = process.env.GH_TOKEN;
-if (!GH_TOKEN) {
-  console.error("❌ GH_TOKEN missing");
-  process.exit(1);
-}
+if (!GH_TOKEN) throw new Error("GH_TOKEN missing");
+
+/* ================= STATE ================= */
+
+let CURRENT_PACK_DIR = "";
 
 /* ================= UTILS ================= */
 
@@ -57,30 +57,27 @@ async function ghApi(method, url, body) {
   return res.status === 204 ? {} : res.json();
 }
 
-async function ensurePackRepo(pack) {
+async function setupNewPack(pack) {
   const name = `${BASE_REPO}-${String(pack).padStart(3, "0")}`;
-  console.log(`📦 Using repo: ${name}`);
+  console.log(`📦 Switching to pack: ${name}`);
 
-  const check = await ghApi("GET", `/repos/${OWNER}/${name}`);
-  if (check?.message === "Not Found") {
-    console.log(`🆕 Creating repo: ${name}`);
-    await ghApi("POST", "/user/repos", { name, private: false });
+  // create repo if missing
+  const repo = await ghApi("GET", `/repos/${OWNER}/${name}`);
+  if (repo?.message === "Not Found") {
+    console.log(`🆕 Creating repo ${name}`);
+    await ghApi("POST", "/user/repos", { name });
   }
 
-  if (!fs.existsSync(".git")) {
-    execSync("git init");
-    execSync("git branch -M main");
-  }
+  // clean workspace COMPLETELY
+  execSync("rm -rf pack");
+  fs.mkdirSync("pack");
 
-  execSync("git remote remove origin || true");
-  execSync(
-    `git remote add origin https://${GH_TOKEN}@github.com/${OWNER}/${name}.git`
-  );
+  process.chdir("pack");
+  CURRENT_PACK_DIR = process.cwd();
 
-  execSync("git pull origin main || true");
-
-  // ✅ IMPORTANT: set upstream ONCE
-  execSync("git push -u origin main || true");
+  execSync("git init");
+  execSync("git branch -M main");
+  execSync(`git remote add origin https://${GH_TOKEN}@github.com/${OWNER}/${name}.git`);
 }
 
 /* ================= DOWNLOAD ================= */
@@ -89,140 +86,100 @@ function download(url, dest, redirects = 0, retried = false) {
   return new Promise((resolve, reject) => {
     if (redirects > 5) return reject(new Error("Too many redirects"));
 
-    const proto = url.startsWith("https://") ? https : http;
+    const proto = url.startsWith("https") ? https : http;
     const file = fs.createWriteStream(dest);
 
-    proto.get(
-      url,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (compatible; IA-Downloader/1.0)"
-        }
-      },
-      res => {
-        if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
-          file.close();
-          fs.unlinkSync(dest);
-          console.log(`🔁 Redirect → ${res.headers.location}`);
-          return resolve(
-            download(res.headers.location, dest, redirects + 1, retried)
-          );
-        }
-
-        if (res.statusCode === 401 && !retried && url.startsWith("https://")) {
-          file.close();
-          fs.unlinkSync(dest);
-          console.log("🔄 401 → retry via HTTP");
-          return resolve(
-            download(url.replace("https://", "http://"), dest, redirects, true)
-          );
-        }
-
-        if (res.statusCode !== 200) {
-          file.close();
-          fs.unlinkSync(dest);
-          return reject(new Error(`HTTP ${res.statusCode}`));
-        }
-
-        res.pipe(file);
-        file.on("finish", () => file.close(resolve));
+    proto.get(url, {
+      headers: { "User-Agent": "Mozilla/5.0" }
+    }, res => {
+      if ([301,302,303,307,308].includes(res.statusCode)) {
+        file.close(); fs.unlinkSync(dest);
+        return resolve(download(res.headers.location, dest, redirects + 1, retried));
       }
-    ).on("error", err => {
-      file.close();
-      fs.unlinkSync(dest);
-      reject(err);
-    });
+
+      if (res.statusCode === 401 && !retried) {
+        file.close(); fs.unlinkSync(dest);
+        return resolve(download(url.replace("https","http"), dest, redirects, true));
+      }
+
+      if (res.statusCode !== 200) {
+        file.close(); fs.unlinkSync(dest);
+        return reject(new Error(`HTTP ${res.statusCode}`));
+      }
+
+      res.pipe(file);
+      file.on("finish", () => file.close(resolve));
+    }).on("error", reject);
   });
 }
 
 /* ================= MAIN ================= */
 
 async function main() {
-  if (!fs.existsSync(ITEMS_FILE)) {
-    throw new Error("names.txt not found in repo root");
-  }
-
-  const items = fs
-    .readFileSync(ITEMS_FILE, "utf8")
-    .split("\n")
-    .map(x => x.trim())
-    .filter(Boolean);
+  const items = fs.readFileSync(ITEMS_FILE, "utf8")
+    .split("\n").map(x => x.trim()).filter(Boolean);
 
   const progress = loadProgress();
 
   console.log("🚀 Downloader started");
 
-  // 🚫 Never push to Playora
-  await ensurePackRepo(progress.pack);
+  await setupNewPack(progress.pack);
 
   for (const item of items) {
-    if (progress.completed.includes(item) || progress.skipped.includes(item)) {
-      console.log(`⏭ Already handled: ${item}`);
-      continue;
-    }
 
-    console.log(`🔍 Item: ${item}`);
+    if (progress.completed.includes(item) || progress.skipped.includes(item)) continue;
 
-    const meta = await fetch(`https://archive.org/metadata/${item}`).then(r =>
-      r.json()
-    );
+    console.log(`🔍 ${item}`);
 
+    const meta = await fetch(`https://archive.org/metadata/${item}`).then(r => r.json());
     const files = meta.files || [];
-    const swf = files.find(f => f.name?.toLowerCase().endsWith(".swf"));
+    const swf = files.find(f => f.name?.endsWith(".swf"));
 
     if (!swf || !swf.size) {
-      console.log("⚠ No SWF");
-      progress.skipped.push(item);
-      saveProgress(progress);
-      continue;
+      progress.skipped.push(item); saveProgress(progress); continue;
     }
 
-    const swfMB = Number(swf.size) / 1024 / 1024;
-    if (swfMB > MAX_ITEM_MB) {
-      console.log(`🚫 Skip (${swfMB.toFixed(1)} MB)`);
-      progress.skipped.push(item);
-      saveProgress(progress);
-      continue;
+    const sizeMB = swf.size / 1024 / 1024;
+    if (sizeMB > MAX_ITEM_MB) {
+      progress.skipped.push(item); saveProgress(progress); continue;
     }
 
-    if (progress.sizeMB + swfMB >= PACK_LIMIT_MB) {
+    if (progress.sizeMB + sizeMB > PACK_LIMIT_MB) {
       progress.pack++;
       progress.sizeMB = 0;
       saveProgress(progress);
-      await ensurePackRepo(progress.pack);
+      process.chdir("..");
+      await setupNewPack(progress.pack);
     }
 
     const dir = path.join("games", item);
     fs.mkdirSync(dir, { recursive: true });
 
     const base = `https://archive.org/download/${item}/`;
-
-    console.log("⬇ SWF");
     await download(base + swf.name, path.join(dir, `${item}.swf`));
 
-    const img = files.find(f => /\.(jpg|png)$/i.test(f.name));
+    const img = files.find(f => /\.(png|jpg)$/i.test(f.name));
     if (img) {
-      const ext = img.name.toLowerCase().endsWith(".png") ? "png" : "jpg";
-      console.log("🖼 Image");
+      const ext = img.name.endsWith(".png") ? "png" : "jpg";
       await download(base + img.name, path.join(dir, `c.${ext}`));
     }
 
-    progress.completed.push(item);
-    progress.sizeMB += swfMB;
-    saveProgress(progress);
-
     execSync("git add .");
     execSync(`git commit -m "Add ${item}"`);
-    execSync("git push");
+    execSync("git push -u origin main");
 
-    console.log(`✅ Done: ${item}`);
+    progress.completed.push(item);
+    progress.sizeMB += sizeMB;
+    saveProgress(progress);
+
+    console.log(`✅ ${item}`);
     await sleep(DELAY_MS);
   }
 
   console.log("🎉 ALL DONE");
 }
 
-main().catch(err => {
-  console.error("❌ Fatal error:", err);
+main().catch(e => {
+  console.error("❌ Fatal:", e);
   process.exit(1);
 });
