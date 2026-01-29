@@ -1,6 +1,8 @@
 /**
- * FINAL – CORRECT ARCHITECTURE VERSION
- * No duplicate packs, no git errors
+ * FINAL STABLE VERSION
+ * - New repo per pack
+ * - No duplicate uploads
+ * - Git identity fixed
  */
 
 import fs from "fs";
@@ -13,6 +15,7 @@ import { execSync } from "child_process";
 
 const OWNER = "Cyberpross";
 const BASE_REPO = "flash-pack";
+
 const ITEMS_FILE = "names.txt";
 const PROGRESS_FILE = "progress.json";
 
@@ -21,11 +24,7 @@ const PACK_LIMIT_MB = 1024;
 const DELAY_MS = 1200;
 
 const GH_TOKEN = process.env.GH_TOKEN;
-if (!GH_TOKEN) throw new Error("GH_TOKEN missing");
-
-/* ================= STATE ================= */
-
-let CURRENT_PACK_DIR = "";
+if (!GH_TOKEN) throw new Error("❌ GH_TOKEN missing");
 
 /* ================= UTILS ================= */
 
@@ -44,62 +43,57 @@ function saveProgress(p) {
 
 /* ================= GITHUB ================= */
 
-async function ghApi(method, url, body) {
+async function gh(method, url, body) {
   const res = await fetch(`https://api.github.com${url}`, {
     method,
     headers: {
       Authorization: `token ${GH_TOKEN}`,
       Accept: "application/vnd.github+json",
-      "User-Agent": "flash-downloader"
+      "User-Agent": "flash-crawler"
     },
     body: body ? JSON.stringify(body) : undefined
   });
   return res.status === 204 ? {} : res.json();
 }
 
-async function setupNewPack(pack) {
-  const name = `${BASE_REPO}-${String(pack).padStart(3, "0")}`;
-  console.log(`📦 Switching to pack: ${name}`);
+async function setupPack(pack) {
+  const repo = `${BASE_REPO}-${String(pack).padStart(3, "0")}`;
+  console.log(`📦 Switching to pack: ${repo}`);
 
-  // create repo if missing
-  const repo = await ghApi("GET", `/repos/${OWNER}/${name}`);
-  if (repo?.message === "Not Found") {
-    console.log(`🆕 Creating repo ${name}`);
-    await ghApi("POST", "/user/repos", { name });
+  const exists = await gh("GET", `/repos/${OWNER}/${repo}`);
+  if (exists?.message === "Not Found") {
+    console.log(`🆕 Creating repo ${repo}`);
+    await gh("POST", "/user/repos", { name: repo });
   }
 
-  // clean workspace COMPLETELY
+  // CLEAN workspace
   execSync("rm -rf pack");
   fs.mkdirSync("pack");
-
   process.chdir("pack");
-  CURRENT_PACK_DIR = process.cwd();
 
   execSync("git init");
   execSync("git branch -M main");
-  execSync(`git remote add origin https://${GH_TOKEN}@github.com/${OWNER}/${name}.git`);
+
+  // ✅ FIX: set git identity
+  execSync(`git config user.name "github-actions[bot]"`);
+  execSync(`git config user.email "41898282+github-actions[bot]@users.noreply.github.com"`);
+
+  execSync(`git remote add origin https://${GH_TOKEN}@github.com/${OWNER}/${repo}.git`);
 }
 
 /* ================= DOWNLOAD ================= */
 
-function download(url, dest, redirects = 0, retried = false) {
+function download(url, dest, redirects = 0) {
   return new Promise((resolve, reject) => {
     if (redirects > 5) return reject(new Error("Too many redirects"));
 
     const proto = url.startsWith("https") ? https : http;
     const file = fs.createWriteStream(dest);
 
-    proto.get(url, {
-      headers: { "User-Agent": "Mozilla/5.0" }
-    }, res => {
+    proto.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, res => {
       if ([301,302,303,307,308].includes(res.statusCode)) {
         file.close(); fs.unlinkSync(dest);
-        return resolve(download(res.headers.location, dest, redirects + 1, retried));
-      }
-
-      if (res.statusCode === 401 && !retried) {
-        file.close(); fs.unlinkSync(dest);
-        return resolve(download(url.replace("https","http"), dest, redirects, true));
+        return resolve(download(res.headers.location, dest, redirects + 1));
       }
 
       if (res.statusCode !== 200) {
@@ -122,8 +116,7 @@ async function main() {
   const progress = loadProgress();
 
   console.log("🚀 Downloader started");
-
-  await setupNewPack(progress.pack);
+  await setupPack(progress.pack);
 
   for (const item of items) {
 
@@ -149,7 +142,7 @@ async function main() {
       progress.sizeMB = 0;
       saveProgress(progress);
       process.chdir("..");
-      await setupNewPack(progress.pack);
+      await setupPack(progress.pack);
     }
 
     const dir = path.join("games", item);
@@ -161,7 +154,7 @@ async function main() {
     const img = files.find(f => /\.(png|jpg)$/i.test(f.name));
     if (img) {
       const ext = img.name.endsWith(".png") ? "png" : "jpg";
-      await download(base + img.name, path.join(dir, `c.${ext}`));
+      await download(base + img.name, path.join(dir, `cover.${ext}`));
     }
 
     execSync("git add .");
@@ -180,6 +173,6 @@ async function main() {
 }
 
 main().catch(e => {
-  console.error("❌ Fatal:", e);
+  console.error("❌ Fatal:", e.message);
   process.exit(1);
 });
