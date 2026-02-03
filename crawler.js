@@ -1,5 +1,6 @@
 /**
- * FINAL VERSION – SKIP + RETRY SYSTEM
+ * FINAL CLEAN VERSION
+ * Source: Internet Archive Advanced Search (NO names.txt)
  */
 
 import fs from "fs";
@@ -13,12 +14,13 @@ import { execSync } from "child_process";
 const OWNER = "Cyberpross";
 const BASE_REPO = "flash-pack";
 
-const ITEMS_FILE = "names.txt";
 const PROGRESS_FILE = "progress.json";
-const SKIPPED_FILE = "skipped.txt";
+const SKIP_AUTH = "skipped_auth.txt";
+const SKIP_LARGE = "skipped_large.txt";
 
 const MAX_ITEM_MB = 100;
 const PACK_LIMIT_MB = 1024;
+const PAGE_SIZE = 1000;
 const DELAY_MS = 1200;
 
 const GH_TOKEN = process.env.GH_TOKEN;
@@ -34,23 +36,11 @@ function loadProgress() {
   }
   return JSON.parse(fs.readFileSync(PROGRESS_FILE, "utf8"));
 }
-
 function saveProgress(p) {
   fs.writeFileSync(PROGRESS_FILE, JSON.stringify(p, null, 2));
 }
-
-function loadSkipped() {
-  if (!fs.existsSync(SKIPPED_FILE)) return new Set();
-  return new Set(
-    fs.readFileSync(SKIPPED_FILE, "utf8")
-      .split("\n")
-      .map(x => x.trim())
-      .filter(Boolean)
-  );
-}
-
-function saveSkipped(set) {
-  fs.writeFileSync(SKIPPED_FILE, [...set].join("\n"));
+function append(file, text) {
+  fs.appendFileSync(file, text + "\n");
 }
 
 /* ================= GITHUB ================= */
@@ -86,7 +76,6 @@ async function setupPack(pack) {
   execSync("git branch -M main");
   execSync(`git config user.name "github-actions[bot]"`);
   execSync(`git config user.email "41898282+github-actions[bot]@users.noreply.github.com"`);
-
   execSync(`git remote add origin https://${GH_TOKEN}@github.com/${OWNER}/${repo}.git`);
 }
 
@@ -104,12 +93,10 @@ function rawDownload(url, dest, redirects = 0) {
         file.close(); fs.unlinkSync(dest);
         return resolve(rawDownload(res.headers.location, dest, redirects + 1));
       }
-
       if (res.statusCode !== 200) {
         file.close(); fs.unlinkSync(dest);
         return reject(new Error(`HTTP ${res.statusCode}`));
       }
-
       res.pipe(file);
       file.on("finish", () => file.close(resolve));
     }).on("error", reject);
@@ -121,27 +108,51 @@ async function safeDownload(url, dest) {
     await rawDownload(url, dest);
     return true;
   } catch (e) {
-    if (/HTTP (401|403|404)/.test(e.message)) {
-      console.log(`⚠ Skipped (access denied)`);
-      return false;
-    }
+    if (/HTTP (401|403|404)/.test(e.message)) return false;
     throw e;
   }
 }
 
-/* ================= PROCESS ITEM ================= */
+/* ================= IA SEARCH ================= */
 
-async function processItem(item, progress, skipped) {
+async function fetchAllItems() {
+  console.log("🔍 Fetching Internet Archive collection list...");
+  const items = [];
+  let start = 0;
+
+  while (true) {
+    const url =
+      `https://archive.org/advancedsearch.php?q=collection:softwarelibrary_flash_games` +
+      `&fl[]=identifier&rows=${PAGE_SIZE}&start=${start}&output=json`;
+
+    const data = await fetch(url).then(r => r.json());
+    const docs = data?.response?.docs || [];
+    if (docs.length === 0) break;
+
+    docs.forEach(d => items.push(d.identifier));
+    console.log(`📄 Loaded ${items.length}`);
+    start += PAGE_SIZE;
+  }
+
+  return [...new Set(items)];
+}
+
+/* ================= ITEM PROCESS ================= */
+
+async function processItem(item, progress) {
   console.log(`🔍 ${item}`);
 
   const meta = await fetch(`https://archive.org/metadata/${item}`).then(r => r.json());
   const files = meta.files || [];
   const swf = files.find(f => f.name?.endsWith(".swf"));
 
-  if (!swf || !swf.size) return false;
+  if (!swf || !swf.size) return;
 
   const sizeMB = swf.size / 1024 / 1024;
-  if (sizeMB > MAX_ITEM_MB) return false;
+  if (sizeMB > MAX_ITEM_MB) {
+    append(SKIP_LARGE, item);
+    return;
+  }
 
   if (progress.sizeMB + sizeMB > PACK_LIMIT_MB) {
     progress.pack++;
@@ -157,9 +168,8 @@ async function processItem(item, progress, skipped) {
   const base = `https://archive.org/download/${item}/`;
   const ok = await safeDownload(base + swf.name, path.join(dir, `${item}.swf`));
   if (!ok) {
-    skipped.add(item);
-    saveSkipped(skipped);
-    return false;
+    append(SKIP_AUTH, item);
+    return;
   }
 
   const img = files.find(f => /\.(png|jpg)$/i.test(f.name));
@@ -178,35 +188,23 @@ async function processItem(item, progress, skipped) {
 
   console.log(`✅ ${item}`);
   await sleep(DELAY_MS);
-  return true;
 }
 
 /* ================= MAIN ================= */
 
 async function main() {
-  const items = fs.readFileSync(ITEMS_FILE, "utf8")
-    .split("\n").map(x => x.trim()).filter(Boolean);
-
+  const allItems = await fetchAllItems();
   const progress = loadProgress();
-  const skipped = loadSkipped();
 
-  console.log("🚀 Downloader started");
+  console.log(`🎯 Total unique items: ${allItems.length}`);
   await setupPack(progress.pack);
 
-  for (const item of items) {
+  for (const item of allItems) {
     if (progress.completed.includes(item)) continue;
-    await processItem(item, progress, skipped);
+    await processItem(item, progress);
   }
 
-  // 🔁 RETRY SKIPPED ONCE
-  console.log("🔁 Retrying skipped items...");
-  for (const item of [...skipped]) {
-    const ok = await processItem(item, progress, skipped);
-    if (ok) skipped.delete(item);
-    saveSkipped(skipped);
-  }
-
-  console.log("🎉 ALL DONE");
+  console.log("🎉 COLLECTION FINISHED");
 }
 
 main().catch(e => {
