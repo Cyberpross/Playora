@@ -1,6 +1,6 @@
 /**
- * FINAL CLEAN VERSION
- * Source: Internet Archive Advanced Search (NO names.txt)
+ * FINAL, STABLE, DUPLICATE-FREE CRAWLER
+ * Source: Internet Archive Advanced Search (sorted pagination)
  */
 
 import fs from "fs";
@@ -24,7 +24,7 @@ const PAGE_SIZE = 1000;
 const DELAY_MS = 1200;
 
 const GH_TOKEN = process.env.GH_TOKEN;
-if (!GH_TOKEN) throw new Error("GH_TOKEN missing");
+if (!GH_TOKEN) throw new Error("❌ GH_TOKEN missing");
 
 /* ================= HELPERS ================= */
 
@@ -36,10 +36,12 @@ function loadProgress() {
   }
   return JSON.parse(fs.readFileSync(PROGRESS_FILE, "utf8"));
 }
+
 function saveProgress(p) {
   fs.writeFileSync(PROGRESS_FILE, JSON.stringify(p, null, 2));
 }
-function append(file, text) {
+
+function appendLine(file, text) {
   fs.appendFileSync(file, text + "\n");
 }
 
@@ -65,7 +67,7 @@ async function setupPack(pack) {
   const check = await gh("GET", `/repos/${OWNER}/${repo}`);
   if (check?.message === "Not Found") {
     console.log(`🆕 Creating repo ${repo}`);
-    await gh("POST", "/user/repos", { name: repo });
+    await gh("POST", "/user/repos", { name: repo, private: false });
   }
 
   execSync("rm -rf pack");
@@ -83,7 +85,7 @@ async function setupPack(pack) {
 
 function rawDownload(url, dest, redirects = 0) {
   return new Promise((resolve, reject) => {
-    if (redirects > 5) return reject(new Error("redirect"));
+    if (redirects > 5) return reject(new Error("Too many redirects"));
 
     const proto = url.startsWith("https") ? https : http;
     const file = fs.createWriteStream(dest);
@@ -93,10 +95,12 @@ function rawDownload(url, dest, redirects = 0) {
         file.close(); fs.unlinkSync(dest);
         return resolve(rawDownload(res.headers.location, dest, redirects + 1));
       }
+
       if (res.statusCode !== 200) {
         file.close(); fs.unlinkSync(dest);
         return reject(new Error(`HTTP ${res.statusCode}`));
       }
+
       res.pipe(file);
       file.on("finish", () => file.close(resolve));
     }).on("error", reject);
@@ -113,31 +117,40 @@ async function safeDownload(url, dest) {
   }
 }
 
-/* ================= IA SEARCH ================= */
+/* ================= IA ADVANCED SEARCH ================= */
 
 async function fetchAllItems() {
-  console.log("🔍 Fetching Internet Archive collection list...");
+  console.log("🔍 Fetching Internet Archive collection list (stable pagination)...");
   const items = [];
   let start = 0;
 
   while (true) {
     const url =
-      `https://archive.org/advancedsearch.php?q=collection:softwarelibrary_flash_games` +
-      `&fl[]=identifier&rows=${PAGE_SIZE}&start=${start}&output=json`;
+      `https://archive.org/advancedsearch.php` +
+      `?q=collection:softwarelibrary_flash_games AND mediatype:software` +
+      `&fl[]=identifier` +
+      `&rows=${PAGE_SIZE}` +
+      `&start=${start}` +
+      `&sort[]=identifier asc` +
+      `&output=json`;
 
     const data = await fetch(url).then(r => r.json());
     const docs = data?.response?.docs || [];
+
     if (docs.length === 0) break;
 
-    docs.forEach(d => items.push(d.identifier));
+    for (const d of docs) items.push(d.identifier);
+
     console.log(`📄 Loaded ${items.length}`);
     start += PAGE_SIZE;
   }
 
-  return [...new Set(items)];
+  const unique = [...new Set(items)];
+  console.log(`🎯 Total unique items: ${unique.length}`);
+  return unique;
 }
 
-/* ================= ITEM PROCESS ================= */
+/* ================= PROCESS ITEM ================= */
 
 async function processItem(item, progress) {
   console.log(`🔍 ${item}`);
@@ -150,7 +163,7 @@ async function processItem(item, progress) {
 
   const sizeMB = swf.size / 1024 / 1024;
   if (sizeMB > MAX_ITEM_MB) {
-    append(SKIP_LARGE, item);
+    appendLine(SKIP_LARGE, item);
     return;
   }
 
@@ -166,9 +179,13 @@ async function processItem(item, progress) {
   fs.mkdirSync(dir, { recursive: true });
 
   const base = `https://archive.org/download/${item}/`;
-  const ok = await safeDownload(base + swf.name, path.join(dir, `${item}.swf`));
+  const ok = await safeDownload(
+    base + swf.name,
+    path.join(dir, `${item}.swf`)
+  );
+
   if (!ok) {
-    append(SKIP_AUTH, item);
+    appendLine(SKIP_AUTH, item);
     return;
   }
 
@@ -193,21 +210,21 @@ async function processItem(item, progress) {
 /* ================= MAIN ================= */
 
 async function main() {
-  const allItems = await fetchAllItems();
+  const items = await fetchAllItems();
   const progress = loadProgress();
 
-  console.log(`🎯 Total unique items: ${allItems.length}`);
+  console.log("🚀 Downloader started");
   await setupPack(progress.pack);
 
-  for (const item of allItems) {
+  for (const item of items) {
     if (progress.completed.includes(item)) continue;
     await processItem(item, progress);
   }
 
-  console.log("🎉 COLLECTION FINISHED");
+  console.log("🎉 ALL ITEMS PROCESSED");
 }
 
-main().catch(e => {
-  console.error("❌ Fatal:", e.message);
+main().catch(err => {
+  console.error("❌ Fatal error:", err.message);
   process.exit(1);
 });
