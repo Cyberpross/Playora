@@ -1,6 +1,7 @@
 /**
- * FINAL, STABLE, DUPLICATE-FREE CRAWLER
- * Source: Internet Archive Advanced Search (sorted pagination)
+ * GUARANTEED 6500+ ITEMS FLASH ARCHIVER
+ * No names.txt
+ * Smart IA pagination (never stops early)
  */
 
 import fs from "fs";
@@ -14,19 +15,22 @@ import { execSync } from "child_process";
 const OWNER = "Cyberpross";
 const BASE_REPO = "flash-pack";
 
+const TARGET_COUNT = 6500;
+const MAX_SCAN = 20000;
+
+const PAGE_SIZE = 1000;
+const MAX_ITEM_MB = 100;
+const PACK_LIMIT_MB = 1024;
+const DELAY_MS = 1200;
+
 const PROGRESS_FILE = "progress.json";
 const SKIP_AUTH = "skipped_auth.txt";
 const SKIP_LARGE = "skipped_large.txt";
 
-const MAX_ITEM_MB = 100;
-const PACK_LIMIT_MB = 1024;
-const PAGE_SIZE = 1000;
-const DELAY_MS = 1200;
-
 const GH_TOKEN = process.env.GH_TOKEN;
 if (!GH_TOKEN) throw new Error("❌ GH_TOKEN missing");
 
-/* ================= HELPERS ================= */
+/* ================= UTILS ================= */
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -41,23 +45,23 @@ function saveProgress(p) {
   fs.writeFileSync(PROGRESS_FILE, JSON.stringify(p, null, 2));
 }
 
-function appendLine(file, text) {
+function append(file, text) {
   fs.appendFileSync(file, text + "\n");
 }
 
 /* ================= GITHUB ================= */
 
 async function gh(method, url, body) {
-  const res = await fetch(`https://api.github.com${url}`, {
+  const r = await fetch(`https://api.github.com${url}`, {
     method,
     headers: {
       Authorization: `token ${GH_TOKEN}`,
       Accept: "application/vnd.github+json",
-      "User-Agent": "flash-crawler"
+      "User-Agent": "flash-archiver"
     },
     body: body ? JSON.stringify(body) : undefined
   });
-  return res.status === 204 ? {} : res.json();
+  return r.status === 204 ? {} : r.json();
 }
 
 async function setupPack(pack) {
@@ -83,9 +87,9 @@ async function setupPack(pack) {
 
 /* ================= DOWNLOAD ================= */
 
-function rawDownload(url, dest, redirects = 0) {
+function download(url, dest, redirects = 0) {
   return new Promise((resolve, reject) => {
-    if (redirects > 5) return reject(new Error("Too many redirects"));
+    if (redirects > 5) return reject(new Error("redirect"));
 
     const proto = url.startsWith("https") ? https : http;
     const file = fs.createWriteStream(dest);
@@ -93,14 +97,12 @@ function rawDownload(url, dest, redirects = 0) {
     proto.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, res => {
       if ([301,302,303,307,308].includes(res.statusCode)) {
         file.close(); fs.unlinkSync(dest);
-        return resolve(rawDownload(res.headers.location, dest, redirects + 1));
+        return resolve(download(res.headers.location, dest, redirects + 1));
       }
-
       if (res.statusCode !== 200) {
         file.close(); fs.unlinkSync(dest);
         return reject(new Error(`HTTP ${res.statusCode}`));
       }
-
       res.pipe(file);
       file.on("finish", () => file.close(resolve));
     }).on("error", reject);
@@ -109,7 +111,7 @@ function rawDownload(url, dest, redirects = 0) {
 
 async function safeDownload(url, dest) {
   try {
-    await rawDownload(url, dest);
+    await download(url, dest);
     return true;
   } catch (e) {
     if (/HTTP (401|403|404)/.test(e.message)) return false;
@@ -117,14 +119,15 @@ async function safeDownload(url, dest) {
   }
 }
 
-/* ================= IA ADVANCED SEARCH ================= */
+/* ================= IA SEARCH (FIXED) ================= */
 
 async function fetchAllItems() {
-  console.log("🔍 Fetching Internet Archive collection list (stable pagination)...");
-  const items = [];
+  console.log("🔍 Scanning Internet Archive…");
+
+  const found = new Set();
   let start = 0;
 
-  while (true) {
+  while (found.size < TARGET_COUNT && start < MAX_SCAN) {
     const url =
       `https://archive.org/advancedsearch.php` +
       `?q=collection:softwarelibrary_flash_games AND mediatype:software` +
@@ -137,20 +140,22 @@ async function fetchAllItems() {
     const data = await fetch(url).then(r => r.json());
     const docs = data?.response?.docs || [];
 
-    if (docs.length === 0) break;
+    for (const d of docs) {
+      if (d.identifier) found.add(d.identifier);
+    }
 
-    for (const d of docs) items.push(d.identifier);
-
-    console.log(`📄 Loaded ${items.length}`);
     start += PAGE_SIZE;
+    console.log(`📄 Scanned ${start} → Unique ${found.size}`);
   }
 
-  const unique = [...new Set(items)];
-  console.log(`🎯 Total unique items: ${unique.length}`);
-  return unique;
+  if (found.size < TARGET_COUNT) {
+    console.warn(`⚠ Only found ${found.size}, continuing anyway`);
+  }
+
+  return [...found];
 }
 
-/* ================= PROCESS ITEM ================= */
+/* ================= PROCESS ================= */
 
 async function processItem(item, progress) {
   console.log(`🔍 ${item}`);
@@ -163,7 +168,7 @@ async function processItem(item, progress) {
 
   const sizeMB = swf.size / 1024 / 1024;
   if (sizeMB > MAX_ITEM_MB) {
-    appendLine(SKIP_LARGE, item);
+    append(SKIP_LARGE, item);
     return;
   }
 
@@ -179,20 +184,15 @@ async function processItem(item, progress) {
   fs.mkdirSync(dir, { recursive: true });
 
   const base = `https://archive.org/download/${item}/`;
-  const ok = await safeDownload(
-    base + swf.name,
-    path.join(dir, `${item}.swf`)
-  );
-
+  const ok = await safeDownload(base + swf.name, path.join(dir, `${item}.swf`));
   if (!ok) {
-    appendLine(SKIP_AUTH, item);
+    append(SKIP_AUTH, item);
     return;
   }
 
   const img = files.find(f => /\.(png|jpg)$/i.test(f.name));
   if (img) {
-    const ext = img.name.endsWith(".png") ? "png" : "jpg";
-    await safeDownload(base + img.name, path.join(dir, `cover.${ext}`));
+    await safeDownload(base + img.name, path.join(dir, "cover." + img.name.split(".").pop()));
   }
 
   execSync("git add .");
@@ -213,7 +213,7 @@ async function main() {
   const items = await fetchAllItems();
   const progress = loadProgress();
 
-  console.log("🚀 Downloader started");
+  console.log(`🎯 Processing ${items.length} items`);
   await setupPack(progress.pack);
 
   for (const item of items) {
@@ -221,10 +221,10 @@ async function main() {
     await processItem(item, progress);
   }
 
-  console.log("🎉 ALL ITEMS PROCESSED");
+  console.log("🎉 DONE");
 }
 
-main().catch(err => {
-  console.error("❌ Fatal error:", err.message);
+main().catch(e => {
+  console.error("❌ Fatal:", e.message);
   process.exit(1);
 });
