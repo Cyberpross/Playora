@@ -1,7 +1,6 @@
 /**
- * GUARANTEED 6500+ ITEMS FLASH ARCHIVER
- * No names.txt
- * Smart IA pagination (never stops early)
+ * Internet Archive Flash Collector
+ * GUARANTEED full collection via A–Z prefix scan
  */
 
 import fs from "fs";
@@ -16,19 +15,18 @@ const OWNER = "Cyberpross";
 const BASE_REPO = "flash-pack";
 
 const TARGET_COUNT = 6500;
-const MAX_SCAN = 20000;
-
 const PAGE_SIZE = 1000;
 const MAX_ITEM_MB = 100;
 const PACK_LIMIT_MB = 1024;
+
 const DELAY_MS = 1200;
 
 const PROGRESS_FILE = "progress.json";
-const SKIP_AUTH = "skipped_auth.txt";
 const SKIP_LARGE = "skipped_large.txt";
+const SKIP_AUTH = "skipped_auth.txt";
 
 const GH_TOKEN = process.env.GH_TOKEN;
-if (!GH_TOKEN) throw new Error("❌ GH_TOKEN missing");
+if (!GH_TOKEN) throw new Error("GH_TOKEN missing");
 
 /* ================= UTILS ================= */
 
@@ -36,7 +34,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function loadProgress() {
   if (!fs.existsSync(PROGRESS_FILE)) {
-    return { pack: 1, sizeMB: 0, completed: [] };
+    return { pack: 1, sizeMB: 0, done: [] };
   }
   return JSON.parse(fs.readFileSync(PROGRESS_FILE, "utf8"));
 }
@@ -45,8 +43,8 @@ function saveProgress(p) {
   fs.writeFileSync(PROGRESS_FILE, JSON.stringify(p, null, 2));
 }
 
-function append(file, text) {
-  fs.appendFileSync(file, text + "\n");
+function append(file, txt) {
+  fs.appendFileSync(file, txt + "\n");
 }
 
 /* ================= GITHUB ================= */
@@ -64,9 +62,9 @@ async function gh(method, url, body) {
   return r.status === 204 ? {} : r.json();
 }
 
-async function setupPack(pack) {
+async function setupRepo(pack) {
   const repo = `${BASE_REPO}-${String(pack).padStart(3, "0")}`;
-  console.log(`📦 Using repo: ${repo}`);
+  console.log(`📦 Using repo ${repo}`);
 
   const check = await gh("GET", `/repos/${OWNER}/${repo}`);
   if (check?.message === "Not Found") {
@@ -87,9 +85,9 @@ async function setupPack(pack) {
 
 /* ================= DOWNLOAD ================= */
 
-function download(url, dest, redirects = 0) {
+function download(url, dest, r = 0) {
   return new Promise((resolve, reject) => {
-    if (redirects > 5) return reject(new Error("redirect"));
+    if (r > 5) return reject(new Error("redirect"));
 
     const proto = url.startsWith("https") ? https : http;
     const file = fs.createWriteStream(dest);
@@ -97,7 +95,7 @@ function download(url, dest, redirects = 0) {
     proto.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, res => {
       if ([301,302,303,307,308].includes(res.statusCode)) {
         file.close(); fs.unlinkSync(dest);
-        return resolve(download(res.headers.location, dest, redirects + 1));
+        return resolve(download(res.headers.location, dest, r + 1));
       }
       if (res.statusCode !== 200) {
         file.close(); fs.unlinkSync(dest);
@@ -109,50 +107,48 @@ function download(url, dest, redirects = 0) {
   });
 }
 
-async function safeDownload(url, dest) {
-  try {
-    await download(url, dest);
-    return true;
-  } catch (e) {
-    if (/HTTP (401|403|404)/.test(e.message)) return false;
-    throw e;
-  }
-}
-
-/* ================= IA SEARCH (FIXED) ================= */
+/* ================= IA SEARCH (A–Z FIX) ================= */
 
 async function fetchAllItems() {
-  console.log("🔍 Scanning Internet Archive…");
+  console.log("🔍 Scanning Internet Archive (A–Z)…");
 
-  const found = new Set();
-  let start = 0;
+  const prefixes = [
+    ...Array.from({ length: 26 }, (_, i) => String.fromCharCode(97 + i)),
+    ...Array.from({ length: 10 }, (_, i) => String(i))
+  ];
 
-  while (found.size < TARGET_COUNT && start < MAX_SCAN) {
-    const url =
-      `https://archive.org/advancedsearch.php` +
-      `?q=collection:softwarelibrary_flash_games AND mediatype:software` +
-      `&fl[]=identifier` +
-      `&rows=${PAGE_SIZE}` +
-      `&start=${start}` +
-      `&sort[]=identifier asc` +
-      `&output=json`;
+  const all = new Set();
 
-    const data = await fetch(url).then(r => r.json());
-    const docs = data?.response?.docs || [];
+  for (const prefix of prefixes) {
+    let start = 0;
+    console.log(`🔠 Prefix: ${prefix}`);
 
-    for (const d of docs) {
-      if (d.identifier) found.add(d.identifier);
+    while (true) {
+      const url =
+        `https://archive.org/advancedsearch.php` +
+        `?q=collection:softwarelibrary_flash_games AND identifier:${prefix}*` +
+        `&fl[]=identifier` +
+        `&rows=${PAGE_SIZE}` +
+        `&start=${start}` +
+        `&output=json`;
+
+      const data = await fetch(url).then(r => r.json());
+      const docs = data?.response?.docs || [];
+
+      if (docs.length === 0) break;
+
+      for (const d of docs) {
+        if (d.identifier) all.add(d.identifier);
+      }
+
+      start += PAGE_SIZE;
+      console.log(`  📄 ${prefix} → ${all.size}`);
+      await sleep(300);
     }
-
-    start += PAGE_SIZE;
-    console.log(`📄 Scanned ${start} → Unique ${found.size}`);
   }
 
-  if (found.size < TARGET_COUNT) {
-    console.warn(`⚠ Only found ${found.size}, continuing anyway`);
-  }
-
-  return [...found];
+  console.log(`🎯 Total unique items: ${all.size}`);
+  return [...all];
 }
 
 /* ================= PROCESS ================= */
@@ -177,29 +173,31 @@ async function processItem(item, progress) {
     progress.sizeMB = 0;
     saveProgress(progress);
     process.chdir("..");
-    await setupPack(progress.pack);
+    await setupRepo(progress.pack);
   }
 
   const dir = path.join("games", item);
   fs.mkdirSync(dir, { recursive: true });
 
   const base = `https://archive.org/download/${item}/`;
-  const ok = await safeDownload(base + swf.name, path.join(dir, `${item}.swf`));
-  if (!ok) {
+
+  try {
+    await download(base + swf.name, path.join(dir, `${item}.swf`));
+  } catch {
     append(SKIP_AUTH, item);
     return;
   }
 
   const img = files.find(f => /\.(png|jpg)$/i.test(f.name));
   if (img) {
-    await safeDownload(base + img.name, path.join(dir, "cover." + img.name.split(".").pop()));
+    await download(base + img.name, path.join(dir, "cover." + img.name.split(".").pop()));
   }
 
   execSync("git add .");
   execSync(`git commit -m "Add ${item}"`);
   execSync("git push -u origin main");
 
-  progress.completed.push(item);
+  progress.done.push(item);
   progress.sizeMB += sizeMB;
   saveProgress(progress);
 
@@ -213,15 +211,14 @@ async function main() {
   const items = await fetchAllItems();
   const progress = loadProgress();
 
-  console.log(`🎯 Processing ${items.length} items`);
-  await setupPack(progress.pack);
+  await setupRepo(progress.pack);
 
   for (const item of items) {
-    if (progress.completed.includes(item)) continue;
+    if (progress.done.includes(item)) continue;
     await processItem(item, progress);
   }
 
-  console.log("🎉 DONE");
+  console.log("🎉 ALL DONE");
 }
 
 main().catch(e => {
