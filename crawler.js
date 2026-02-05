@@ -1,6 +1,6 @@
 /**
  * FINAL Internet Archive Flash Archiver
- * Stable • Resume-safe • Retry-enabled
+ * Stable • Resume-safe • A–Z scrape • Retry • Git-safe
  */
 
 import fs from "fs";
@@ -27,12 +27,11 @@ const SKIP_LARGE = "skipped_large.txt";
 const SKIP_TEMP = "skipped_temp.txt";
 
 const GH_TOKEN = process.env.GH_TOKEN;
-if (!GH_TOKEN) throw new Error("GH_TOKEN missing");
+if (!GH_TOKEN) throw new Error("❌ GH_TOKEN missing");
 
 /* ================= UTILS ================= */
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-
 const append = (f, t) => fs.appendFileSync(f, t + "\n");
 
 function loadProgress() {
@@ -80,6 +79,15 @@ async function setupRepo(pack) {
   process.chdir("pack");
   execSync(`git config user.name "github-actions[bot]"`);
   execSync(`git config user.email "41898282+github-actions[bot]@users.noreply.github.com"`);
+}
+
+function hasRemoteMain() {
+  try {
+    execSync("git show-ref --verify --quiet refs/remotes/origin/main");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /* ================= DOWNLOAD ================= */
@@ -210,8 +218,12 @@ async function processItem(item, progress) {
 
   execSync("git add .");
   execSync(`git commit -m "Add ${item}"`);
-  execSync("git pull --rebase");
-  execSync("git push");
+
+  if (hasRemoteMain()) {
+    execSync("git pull --rebase");
+  }
+
+  execSync("git push -u origin main");
 
   progress.done.push(item);
   progress.sizeMB += sizeMB;
@@ -227,9 +239,8 @@ async function retrySkipped(progress) {
   for (let round = 1; round <= RETRY_ROUNDS; round++) {
     console.log(`🔁 Retry round ${round}`);
 
-    if (!fs.existsSync(SKIP_TEMP) && !fs.existsSync(SKIP_AUTH)) return;
-
     const retry = new Set();
+
     [SKIP_TEMP, SKIP_AUTH].forEach(f => {
       if (fs.existsSync(f)) {
         fs.readFileSync(f, "utf8")
@@ -263,7 +274,7 @@ async function main() {
 
   await retrySkipped(progress);
 
-  console.log("🎉 FINISHED");
+  console.log("🎉 ALL DONE");
 }
 
 main().catch(e => {
