@@ -1,182 +1,201 @@
 import fs from "fs";
+import path from "path";
 import { execSync } from "child_process";
 
+const GH_TOKEN = process.env.GH_TOKEN;
 const USER = "Cyberpross";
-const TOKEN = process.env.GH_TOKEN;
-const API = "https://archive.org/advancedsearch.php";
+const MAX_PACK_SIZE = 1024 * 1024 * 1024; // 1GB
+const MAX_ITEM_SIZE = 100 * 1024 * 1024; // 100MB
 
-// ---------------- GIT SAFE ----------------
-
-function git(cmd){
-  execSync(cmd,{stdio:"inherit"});
+// ---------- FETCH JSON ----------
+async function getJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return res.json();
 }
 
-function repoExists(name){
-  try{
-    execSync(`gh repo view ${USER}/${name}`);
-    return true;
-  }catch{return false;}
-}
+// ---------- FETCH WITH REDIRECT ----------
+async function downloadFile(url, dest) {
+  let res = await fetch(url, { redirect: "manual" });
 
-function createOrClone(repo){
-  if(!repoExists(repo)){
-    console.log("🆕 Creating repo",repo);
-    execSync(`gh repo create ${repo} --public --confirm`);
+  if (res.status === 302 || res.status === 301) {
+    const newUrl = res.headers.get("location");
+    console.log("🔁 Redirect →", newUrl);
+    res = await fetch(newUrl);
   }
 
-  git(`rm -rf pack || true`);
-  git(`git clone https://${TOKEN}@github.com/${USER}/${repo}.git pack`);
-  process.chdir("pack");
+  if (!res.ok) throw new Error("Download failed");
 
-  git('git config user.email "bot@github.com"');
-  git('git config user.name "flash-bot"');
-
-  if(!fs.existsSync(".git/refs/heads/main")){
-    git("git checkout -b main");
-  }
+  const buffer = Buffer.from(await res.arrayBuffer());
+  fs.writeFileSync(dest, buffer);
+  return buffer.length;
 }
 
-// commit ONLY if changes
-function pushChanges(msg){
-  git("git add .");
+// ---------- SEARCH ALL ITEMS ----------
+async function getAllItems() {
+  const letters = "abcdefghijklmnopqrstuvwxyz0123456789";
+  const all = new Set();
 
-  let changed=true;
-  try{
-    execSync("git diff --cached --quiet");
-    changed=false;
-  }catch{}
+  for (const letter of letters) {
+    console.log("🔎 Searching:", letter);
+    let page = 1;
 
-  if(!changed){
-    console.log("⏭️ No changes");
-    return;
-  }
+    while (true) {
+      const url =
+        "https://archive.org/advancedsearch.php" +
+        `?q=collection:flash AND mediatype:software AND identifier:${letter}*` +
+        "&fl[]=identifier&rows=1000" +
+        `&page=${page}&output=json`;
 
-  git(`git commit -m "${msg}"`);
+      const json = await getJSON(url);
+      if (!json.response?.docs?.length) break;
 
-  try{ git("git pull --rebase"); }catch{}
-  git("git push -u origin main");
-}
-
-// --------------- LOAD / SAVE STATE ----------------
-
-function loadProgress(){
-  if(!fs.existsSync("progress.json")){
-    return { pack:1, index:0 };
-  }
-  return JSON.parse(fs.readFileSync("progress.json","utf8"));
-}
-
-function saveProgress(p){
-  fs.writeFileSync("progress.json",JSON.stringify(p,null,2));
-  pushChanges("update progress");
-}
-
-// ---------------- FETCH ALL ITEMS ----------------
-
-async function fetchAllItems(){
-  const letters="abcdefghijklmnopqrstuvwxyz0123456789";
-  const set=new Set();
-
-  for(const l of letters){
-    let page=1;
-    while(true){
-      const url=`${API}?q=collection:flash&fl[]=identifier&rows=100&page=${page}&output=json&sort[]=identifier asc&query=${l}`;
-      const res=await fetch(url).then(r=>r.json());
-      const docs=res.response.docs;
-      if(!docs.length) break;
-
-      docs.forEach(d=>set.add(d.identifier));
-      console.log(`📄 ${l} page ${page} total ${set.size}`);
+      json.response.docs.forEach(d => all.add(d.identifier));
+      console.log(`📄 ${letter} page ${page} → ${all.size}`);
       page++;
     }
   }
 
-  const arr=[...set];
-  fs.writeFileSync("all_items.json",JSON.stringify(arr));
-  return arr;
+  return Array.from(all);
 }
 
-// ---------------- DOWNLOAD ----------------
-
-async function downloadItem(id){
-  try{
-    const meta=await fetch(`https://archive.org/metadata/${id}`).then(r=>r.json());
-    const swf=meta.files.find(f=>f.name.endsWith(".swf"));
-    if(!swf) return "skip";
-
-    const url=`https://archive.org/download/${id}/${swf.name}`;
-    const res=await fetch(url);
-
-    if(Number(res.headers.get("content-length"))>100_000_000){
-      fs.appendFileSync("bigfiles.txt",id+"\n");
-      return "big";
-    }
-
-    const buf=await res.arrayBuffer();
-    fs.mkdirSync(id,{recursive:true});
-    fs.writeFileSync(`${id}/${swf.name}`,Buffer.from(buf));
-
-    return "ok";
-  }catch{
-    fs.appendFileSync("skip.txt",id+"\n");
-    return "fail";
-  }
+// ---------- CREATE REPO ----------
+function createRepo(repo) {
+  console.log("🆕 Creating repo", repo);
+  execSync(`curl -X POST https://api.github.com/user/repos \
+  -H "Authorization: token ${GH_TOKEN}" \
+  -d '{"name":"${repo}"}'`, { stdio: "ignore" });
 }
 
-// ---------------- MAIN ----------------
+// ---------- CLONE / PREP REPO ----------
+function prepareRepo(repo) {
+  if (!fs.existsSync("pack")) {
+    try { createRepo(repo); } catch {}
+    execSync(`git clone https://${GH_TOKEN}@github.com/${USER}/${repo}.git pack`);
+  }
+  process.chdir("pack");
 
-async function main(){
+  execSync("git config user.email 'bot@github.com'");
+  execSync("git config user.name 'github-actions'");
 
-  let items;
-  if(fs.existsSync("all_items.json")){
-    items=JSON.parse(fs.readFileSync("all_items.json"));
-  }else{
-    items=await fetchAllItems();
+  try {
+    execSync("git checkout -b main");
+  } catch {
+    try { execSync("git checkout main"); } catch {}
   }
 
-  console.log("🎯 Total:",items.length);
+  try { execSync("git pull origin main --rebase"); } catch {}
+}
 
-  const state=loadProgress();
-  const PACK_SIZE=1000;
+// ---------- MAIN ----------
+async function main() {
+  console.log("🚀 Downloader started");
 
-  for(let i=state.index;i<items.length;i++){
+  const items = await getAllItems();
+  console.log("🎯 Total unique items:", items.length);
 
-    const packNum=Math.floor(i/PACK_SIZE)+1;
-    const repo=`flash-pack-${String(packNum).padStart(3,"0")}`;
+  let pack = 1;
+  let size = 0;
+  let processed = new Set();
+  let skipped = [];
+  let failed = [];
 
-    if(state.pack!==packNum){
-      process.chdir("..");
-      createOrClone(repo);
-      state.pack=packNum;
-    }
+  function startPack() {
+    const repo = `flash-pack-${String(pack).padStart(3,"0")}`;
+    console.log("📦 Using repo:", repo);
+    prepareRepo(repo);
 
-    const id=items[i];
-    console.log("🔍",i,id);
-
-    const result=await downloadItem(id);
-
-    if(result==="ok"){
-      pushChanges(`Add ${id}`);
-    }
-
-    state.index=i+1;
-    saveProgress(state);
+    if (fs.existsSync("processed.txt"))
+      processed = new Set(fs.readFileSync("processed.txt","utf8").split("\n"));
   }
 
-  // -------- RETRY SKIPS 5 TIMES --------
-  if(fs.existsSync("skip.txt")){
-    let list=[...new Set(fs.readFileSync("skip.txt","utf8").split("\n"))];
-    fs.writeFileSync("skip.txt","");
+  startPack();
 
-    for(let r=1;r<=5;r++){
-      console.log("🔁 Retry round",r);
-      for(const id of list){
-        const res=await downloadItem(id);
-        if(res==="ok") pushChanges(`retry ${id}`);
+  for (const id of items) {
+    if (processed.has(id)) continue;
+
+    try {
+      console.log("🔍", id);
+      const meta = await getJSON(`https://archive.org/metadata/${id}`);
+      const files = meta.files || [];
+
+      const swf = files.find(f => f.name?.endsWith(".swf"));
+      if (!swf) { skipped.push(id); continue; }
+
+      if (+swf.size > MAX_ITEM_SIZE) {
+        console.log("⏭ >100MB skip");
+        skipped.push(id);
+        continue;
       }
+
+      const img = files.find(f => f.name.match(/\.(png|jpg|jpeg)$/i));
+      if (!img) { skipped.push(id); continue; }
+
+      const folder = path.join(process.cwd(), id);
+      fs.mkdirSync(folder, { recursive: true });
+
+      const swfSize = await downloadFile(
+        `https://archive.org/download/${id}/${swf.name}`,
+        path.join(folder, swf.name)
+      );
+
+      const imgExt = img.name.split(".").pop();
+      const imgSize = await downloadFile(
+        `https://archive.org/download/${id}/${img.name}`,
+        path.join(folder, `c.${imgExt}`)
+      );
+
+      size += swfSize + imgSize;
+
+      execSync(`git add ${id}`);
+      execSync(`git commit -m "Add ${id}" || echo skip`);
+      execSync(`git push -u origin main --force`);
+
+      fs.appendFileSync("processed.txt", id + "\n");
+
+      if (size > MAX_PACK_SIZE) {
+        process.chdir("..");
+        fs.rmSync("pack", { recursive: true, force: true });
+        pack++;
+        size = 0;
+        startPack();
+      }
+
+    } catch (e) {
+      console.log("❌ Failed:", id);
+      failed.push(id);
     }
   }
 
+  // ---------- RETRY FAILED ----------
+  console.log("🔁 Retrying failed items...");
+  for (let i=0;i<5;i++) {
+    const retry = [...failed];
+    failed = [];
+
+    for (const id of retry) {
+      try {
+        console.log("Retry:", id);
+        const meta = await getJSON(`https://archive.org/metadata/${id}`);
+        const files = meta.files || [];
+        const swf = files.find(f => f.name?.endsWith(".swf"));
+        const img = files.find(f => f.name.match(/\.(png|jpg|jpeg)$/i));
+        if (!swf || !img) continue;
+
+        const folder = path.join(process.cwd(), id);
+        fs.mkdirSync(folder, { recursive: true });
+
+        await downloadFile(`https://archive.org/download/${id}/${swf.name}`, path.join(folder, swf.name));
+        await downloadFile(`https://archive.org/download/${id}/${img.name}`, path.join(folder, "c.png"));
+
+        execSync(`git add ${id}`);
+        execSync(`git commit -m "Retry ${id}" || echo skip`);
+        execSync(`git push -u origin main --force`);
+      } catch { failed.push(id); }
+    }
+  }
+
+  fs.writeFileSync("skipped.txt", skipped.join("\n"));
   console.log("🎉 ALL DONE");
 }
 
