@@ -4,11 +4,11 @@ import { execSync } from "child_process";
 const GH_TOKEN = process.env.GH_TOKEN;
 const USER = "Cyberpross";
 
-const START_AFTER = "swords-and-sandals-crusader_flash"; // 👈 resume point
-let PACK_NUMBER = 13; // 👈 start from pack 13
+const START_AFTER = "swords-and-sandals-crusader_flash";
+let PACK_NUMBER = 13;
 
-const MAX_PACK_SIZE = 1024 * 1024 * 1024; // 1GB
-const MAX_ITEM_SIZE = 100 * 1024 * 1024; // 100MB
+const MAX_PACK_SIZE = 1024 * 1024 * 1024;
+const MAX_ITEM_SIZE = 100 * 1024 * 1024;
 
 // ---------- FETCH JSON ----------
 async function getJSON(url) {
@@ -17,13 +17,15 @@ async function getJSON(url) {
   return res.json();
 }
 
-// ---------- DOWNLOAD WITH REDIRECT ----------
+// ---------- DOWNLOAD ----------
 async function download(url, dest) {
   let res = await fetch(url, { redirect: "manual" });
-  if (res.status === 302 || res.status === 301) {
+
+  if (res.status === 301 || res.status === 302) {
     const newUrl = res.headers.get("location");
     res = await fetch(newUrl);
   }
+
   if (!res.ok) throw new Error("Download failed");
 
   const buf = Buffer.from(await res.arrayBuffer());
@@ -31,7 +33,40 @@ async function download(url, dest) {
   return buf.length;
 }
 
-// ---------- GET ALL ITEMS ----------
+// ---------- SEARCH ALL ITEMS ----------
+async function getAllItems() {
+  const letters = "abcdefghijklmnopqrstuvwxyz0123456789";
+  const all = new Set();
+
+  for (const letter of letters) {
+    console.log("🔎 Searching:", letter);
+    let page = 1;
+
+    while (true) {
+      const query = encodeURIComponent(
+        `collection:flash AND mediatype:software AND identifier:${letter}*`
+      );
+
+      const url =
+        `https://archive.org/advancedsearch.php?q=${query}` +
+        "&fl[]=identifier&rows=1000" +
+        `&page=${page}&output=json`;
+
+      const json = await getJSON(url);
+
+      if (!json.response || json.response.docs.length === 0) break;
+
+      json.response.docs.forEach(d => all.add(d.identifier));
+      console.log(`📄 ${letter} page ${page} → ${all.size}`);
+
+      page++;
+    }
+  }
+
+  const arr = Array.from(all).sort();
+  console.log("🎯 Total items:", arr.length);
+  return arr;
+}
 
 // ---------- CREATE REPO ----------
 function createRepo(repo) {
@@ -64,7 +99,6 @@ async function main() {
 
   let items = await getAllItems();
 
-  // 🔥 resume after specific game
   const index = items.indexOf(START_AFTER);
   items = items.slice(index + 1);
 
@@ -110,7 +144,6 @@ async function main() {
 
       console.log("✅ Uploaded:", id);
 
-      // next pack
       if (size > MAX_PACK_SIZE) {
         process.chdir("..");
         fs.rmSync("pack", { recursive: true, force: true });
@@ -121,7 +154,7 @@ async function main() {
         prepareRepo(newRepo);
       }
 
-    } catch (e) {
+    } catch {
       console.log("❌ Skip:", id);
     }
   }
