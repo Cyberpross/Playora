@@ -1,9 +1,12 @@
 import fs from "fs";
-import path from "path";
 import { execSync } from "child_process";
 
 const GH_TOKEN = process.env.GH_TOKEN;
 const USER = "Cyberpross";
+
+const START_AFTER = "swords-and-sandals-crusader_flash"; // 👈 resume point
+let PACK_NUMBER = 13; // 👈 start from pack 13
+
 const MAX_PACK_SIZE = 1024 * 1024 * 1024; // 1GB
 const MAX_ITEM_SIZE = 100 * 1024 * 1024; // 100MB
 
@@ -14,24 +17,21 @@ async function getJSON(url) {
   return res.json();
 }
 
-// ---------- FETCH WITH REDIRECT ----------
-async function downloadFile(url, dest) {
+// ---------- DOWNLOAD WITH REDIRECT ----------
+async function download(url, dest) {
   let res = await fetch(url, { redirect: "manual" });
-
   if (res.status === 302 || res.status === 301) {
     const newUrl = res.headers.get("location");
-    console.log("🔁 Redirect →", newUrl);
     res = await fetch(newUrl);
   }
-
   if (!res.ok) throw new Error("Download failed");
 
-  const buffer = Buffer.from(await res.arrayBuffer());
-  fs.writeFileSync(dest, buffer);
-  return buffer.length;
+  const buf = Buffer.from(await res.arrayBuffer());
+  fs.writeFileSync(dest, buf);
+  return buf.length;
 }
 
-// ---------- SEARCH ALL ITEMS ----------
+// ---------- GET ALL ITEMS ----------
 async function getAllItems() {
   const letters = "abcdefghijklmnopqrstuvwxyz0123456789";
   const all = new Set();
@@ -51,98 +51,82 @@ async function getAllItems() {
       if (!json.response?.docs?.length) break;
 
       json.response.docs.forEach(d => all.add(d.identifier));
-      console.log(`📄 ${letter} page ${page} → ${all.size}`);
       page++;
     }
   }
 
-  return Array.from(all);
+  const arr = Array.from(all).sort();
+  console.log("🎯 Total items:", arr.length);
+  return arr;
 }
 
 // ---------- CREATE REPO ----------
 function createRepo(repo) {
-  console.log("🆕 Creating repo", repo);
   execSync(`curl -X POST https://api.github.com/user/repos \
   -H "Authorization: token ${GH_TOKEN}" \
   -d '{"name":"${repo}"}'`, { stdio: "ignore" });
 }
 
-// ---------- CLONE / PREP REPO ----------
+// ---------- PREPARE REPO ----------
 function prepareRepo(repo) {
   if (!fs.existsSync("pack")) {
     try { createRepo(repo); } catch {}
     execSync(`git clone https://${GH_TOKEN}@github.com/${USER}/${repo}.git pack`);
   }
+
   process.chdir("pack");
 
   execSync("git config user.email 'bot@github.com'");
   execSync("git config user.name 'github-actions'");
 
-  try {
-    execSync("git checkout -b main");
-  } catch {
-    try { execSync("git checkout main"); } catch {}
-  }
+  try { execSync("git checkout -b main"); }
+  catch { execSync("git checkout main"); }
 
   try { execSync("git pull origin main --rebase"); } catch {}
 }
 
 // ---------- MAIN ----------
 async function main() {
-  console.log("🚀 Downloader started");
+  console.log("🚀 RESUME DOWNLOADER");
 
-  const items = await getAllItems();
-  console.log("🎯 Total unique items:", items.length);
+  let items = await getAllItems();
 
-  let pack = 1;
+  // 🔥 resume after specific game
+  const index = items.indexOf(START_AFTER);
+  items = items.slice(index + 1);
+
+  console.log("▶ Resuming after:", START_AFTER);
+  console.log("Remaining:", items.length);
+
   let size = 0;
-  let processed = new Set();
-  let skipped = [];
-  let failed = [];
-
-  function startPack() {
-    const repo = `flash-pack-${String(pack).padStart(3,"0")}`;
-    console.log("📦 Using repo:", repo);
-    prepareRepo(repo);
-
-    if (fs.existsSync("processed.txt"))
-      processed = new Set(fs.readFileSync("processed.txt","utf8").split("\n"));
-  }
-
-  startPack();
+  const repoName = `flash-pack-${String(PACK_NUMBER).padStart(3,"0")}`;
+  prepareRepo(repoName);
 
   for (const id of items) {
-    if (processed.has(id)) continue;
-
     try {
       console.log("🔍", id);
+
       const meta = await getJSON(`https://archive.org/metadata/${id}`);
       const files = meta.files || [];
 
       const swf = files.find(f => f.name?.endsWith(".swf"));
-      if (!swf) { skipped.push(id); continue; }
-
-      if (+swf.size > MAX_ITEM_SIZE) {
-        console.log("⏭ >100MB skip");
-        skipped.push(id);
-        continue;
-      }
+      if (!swf) continue;
+      if (+swf.size > MAX_ITEM_SIZE) continue;
 
       const img = files.find(f => f.name.match(/\.(png|jpg|jpeg)$/i));
-      if (!img) { skipped.push(id); continue; }
+      if (!img) continue;
 
-      const folder = path.join(process.cwd(), id);
-      fs.mkdirSync(folder, { recursive: true });
+      fs.mkdirSync(id, { recursive: true });
 
-      const swfSize = await downloadFile(
+      const swfSize = await download(
         `https://archive.org/download/${id}/${swf.name}`,
-        path.join(folder, swf.name)
+        `${id}/${swf.name}`
       );
 
-      const imgExt = img.name.split(".").pop();
-      const imgSize = await downloadFile(
+      const ext = img.name.split(".").pop();
+      const imgSize = await download(
         `https://archive.org/download/${id}/${img.name}`,
-        path.join(folder, `c.${imgExt}`)
+        `${id}/c.${ext}`
       );
 
       size += swfSize + imgSize;
@@ -151,52 +135,25 @@ async function main() {
       execSync(`git commit -m "Add ${id}" || echo skip`);
       execSync(`git push -u origin main --force`);
 
-      fs.appendFileSync("processed.txt", id + "\n");
+      console.log("✅ Uploaded:", id);
 
+      // next pack
       if (size > MAX_PACK_SIZE) {
         process.chdir("..");
         fs.rmSync("pack", { recursive: true, force: true });
-        pack++;
+        PACK_NUMBER++;
         size = 0;
-        startPack();
+
+        const newRepo = `flash-pack-${String(PACK_NUMBER).padStart(3,"0")}`;
+        prepareRepo(newRepo);
       }
 
     } catch (e) {
-      console.log("❌ Failed:", id);
-      failed.push(id);
+      console.log("❌ Skip:", id);
     }
   }
 
-  // ---------- RETRY FAILED ----------
-  console.log("🔁 Retrying failed items...");
-  for (let i=0;i<5;i++) {
-    const retry = [...failed];
-    failed = [];
-
-    for (const id of retry) {
-      try {
-        console.log("Retry:", id);
-        const meta = await getJSON(`https://archive.org/metadata/${id}`);
-        const files = meta.files || [];
-        const swf = files.find(f => f.name?.endsWith(".swf"));
-        const img = files.find(f => f.name.match(/\.(png|jpg|jpeg)$/i));
-        if (!swf || !img) continue;
-
-        const folder = path.join(process.cwd(), id);
-        fs.mkdirSync(folder, { recursive: true });
-
-        await downloadFile(`https://archive.org/download/${id}/${swf.name}`, path.join(folder, swf.name));
-        await downloadFile(`https://archive.org/download/${id}/${img.name}`, path.join(folder, "c.png"));
-
-        execSync(`git add ${id}`);
-        execSync(`git commit -m "Retry ${id}" || echo skip`);
-        execSync(`git push -u origin main --force`);
-      } catch { failed.push(id); }
-    }
-  }
-
-  fs.writeFileSync("skipped.txt", skipped.join("\n"));
-  console.log("🎉 ALL DONE");
+  console.log("🎉 FINISHED");
 }
 
 main();
