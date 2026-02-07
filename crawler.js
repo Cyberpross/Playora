@@ -32,33 +32,6 @@ async function download(url, dest) {
 }
 
 // ---------- GET ALL ITEMS ----------
-async function getAllItems() {
-  const letters = "abcdefghijklmnopqrstuvwxyz0123456789";
-  const all = new Set();
-
-  for (const letter of letters) {
-    console.log("🔎 Searching:", letter);
-    let page = 1;
-
-    while (true) {
-      const url =
-        "https://archive.org/advancedsearch.php" +
-        `?q=collection:flash AND mediatype:software AND identifier:${letter}*` +
-        "&fl[]=identifier&rows=1000" +
-        `&page=${page}&output=json`;
-
-      const json = await getJSON(url);
-      if (!json.response?.docs?.length) break;
-
-      json.response.docs.forEach(d => all.add(d.identifier));
-      page++;
-    }
-  }
-
-  const arr = Array.from(all).sort();
-  console.log("🎯 Total items:", arr.length);
-  return arr;
-}
 
 // ---------- CREATE REPO ----------
 function createRepo(repo) {
